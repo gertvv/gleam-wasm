@@ -1,6 +1,6 @@
 (module
   ;; Compile using binaryen:
-  ;;   wasm_as example.wat --enable-gc --enable-reference-types
+  ;;   wasm-as example.wat --enable-gc --enable-reference-types --enable-tail-call
 
   ;; Possibly this can be used for codegen in the gleam compiler:
   ;; https://docs.rs/wasm-encoder/latest/wasm_encoder/
@@ -69,7 +69,6 @@
     )
   )
 
-  ;; non-tail-recursive implementation of fold
   (type $folder (func (param (ref any)) (param (ref any)) (result (ref any))))
   (func $fold
     (param $l (ref null $list))
@@ -79,7 +78,7 @@
     (local $nel (ref $list))
     (if (call $list_is_empty (local.get $l)) (then (return (local.get $i))))
     (local.set $nel (ref.as_non_null (local.get $l)))
-    (call $fold
+    (return_call $fold
       (call $list_tail (local.get $nel))
       (call_ref $folder
         (local.get $i)
