@@ -49,16 +49,21 @@
     (param $f (ref $folder))
     (result (ref any))
     (local $nel (ref $gleam/List))
-    (if (call $gleam/list_is_empty (local.get $l)) (then (return (local.get $i))))
-    (local.set $nel (ref.as_non_null (local.get $l)))
-    (return_call $fold
-      (call $gleam/list_tail (local.get $nel))
-      (call_ref $folder
-        (local.get $i)
-        (call $gleam/list_head (local.get $nel))
-        (local.get $f)
+    (if
+      (call $gleam/list_is_empty (local.get $l))
+      (then (return (local.get $i)))
+      (else
+        (local.set $nel (ref.as_non_null (local.get $l)))
+        (return_call $fold
+          (call $gleam/list_tail (local.get $nel))
+          (call_ref $folder
+            (local.get $i)
+            (call $gleam/list_head (local.get $nel))
+            (local.get $f)
+          )
+          (local.get $f)
+        )
       )
-      (local.get $f)
     )
   )
 
