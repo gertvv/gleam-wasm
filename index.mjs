@@ -1,3 +1,4 @@
+// Node.js >= 22 is needed for WASM feature support
 import fs from 'node:fs';
 const load = (filename, imports) => {
   const wasmBuffer = fs.readFileSync(filename);

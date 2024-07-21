@@ -35,8 +35,8 @@
 
   (type $int (struct i64))
 
-  (func $int_unbox (param $boxed (ref $int)) (result i64)
-    (struct.get $int 0 (local.get $boxed))
+  (func $int_unbox (param $boxed (ref any)) (result i64)
+    (struct.get $int 0 (ref.cast (ref $int) (local.get $boxed)))
   )
 
   (func $int_box (param $value i64) (result (ref $int))
