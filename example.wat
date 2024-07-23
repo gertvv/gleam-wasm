@@ -29,19 +29,23 @@
     (i64.add (local.get $a) (local.get $b))
   )
 
-  (type $@fold_arg_f_function (func (param (ref null any)) (param (ref any)) (param (ref any)) (result (ref any))))
+  ;; closure function signature corresponding to fn(acc, a) -> acc
+  ;; the first argument is the closure context
+  ;; for example fn(List(a)) -> a would be $function:List<0>:0
+  (type $function:0.1:0 (func (param (ref null any)) (param (ref any)) (param (ref any)) (result (ref any))))
 
-  (type $@fold_arg_f_closure
+  ;; closure struct consisting of context and function
+  (type $closure:0.1:0
     (struct
-      (field $env (ref null any))
-      (field $fun (ref $@fold_arg_f_function))
+      (field $context (ref null any))
+      (field $function (ref $function:0.1:0))
     )
   )
 
   (func $fold
     (param $l (ref null $gleam/List))
     (param $i (ref any))
-    (param $f (ref $@fold_arg_f_closure))
+    (param $f (ref $closure:0.1:0))
     (result (ref any))
     (local $nel (ref $gleam/List))
     (if
@@ -51,11 +55,11 @@
         (local.set $nel (ref.as_non_null (local.get $l)))
         (return_call $fold
           (call $gleam/list_tail (local.get $nel))
-          (call_ref $@fold_arg_f_function
-            (struct.get $@fold_arg_f_closure $env (local.get $f))
+          (call_ref $function:0.1:0
+            (struct.get $closure:0.1:0 $context (local.get $f))
             (local.get $i)
             (call $gleam/list_head (local.get $nel))
-            (struct.get $@fold_arg_f_closure $fun (local.get $f))
+            (struct.get $closure:0.1:0 $function (local.get $f))
           )
           (local.get $f)
         )
@@ -81,7 +85,7 @@
         $fold
         (local.get $l)
         (struct.new $gleam/Int (i64.const 0))
-        (struct.new $@fold_arg_f_closure (ref.null any) (ref.func $@sum_anon_0))
+        (struct.new $closure:0.1:0 (ref.null any) (ref.func $@sum_anon_0))
       )
     )
   )
