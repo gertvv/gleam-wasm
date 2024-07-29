@@ -14,6 +14,6 @@ load('gleam.wasm').then(gleamModule => {
       list_non_empty(
         int_box(BigInt(41)),
         list_empty()));
-    console.log(int_unbox(sum(list)));
+    console.log(sum(list));
   });
 });

@@ -26,6 +26,7 @@
  
   ;; typed implementation of add
   (func $add (param $a i64) (param $b i64) (result i64)
+    ;;@ example.gleam:1:3
     (i64.add (local.get $a) (local.get $b))
   )
 
@@ -48,6 +49,7 @@
     (param $f (ref $closure:0.1:0))
     (result (ref any))
     (local $nel (ref $gleam/List))
+    ;;@ example.gleam:5:10
     (if
       (call $gleam/list_is_empty (local.get $l))
       (then (return (local.get $i)))
@@ -78,9 +80,10 @@
   )
 
   (func $sum
+    ;;@ example.gleam:12:14
     (param $l (ref $gleam/List))
-    (result (ref $gleam/Int))
-    (ref.cast (ref $gleam/Int)
+    (result i64)
+    (call $gleam/int_unbox
       (call
         $fold
         (local.get $l)
