@@ -9,8 +9,8 @@
 
   (type $gleam/List
     (struct
-      (field $value (ref null any))
-      (field $tail (ref null $gleam/List))
+      (field (ref null any))
+      (field (ref null $gleam/List))
     )
   )
 
