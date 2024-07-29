@@ -3,16 +3,19 @@
 
   (type $list
     (struct
-      (field $value (ref any))
+      (field $value (ref null any))
       (field $tail (ref null $list))
     )
   )
 
-  (func $list_empty (result (ref null $list))
-    (ref.null $list)
+  (func $list_empty (result (ref $list))
+    (struct.new $list
+      (ref.null any)
+      (ref.null $list)
+    )
   )
 
-  (func $list_non_empty (param $value (ref any)) (param $tail (ref null $list)) (result (ref $list))
+  (func $list_non_empty (param $value (ref any)) (param $tail (ref $list)) (result (ref $list))
     (struct.new $list
       (local.get $value)
       (local.get $tail)
@@ -20,15 +23,15 @@
   )
 
   (func $list_head (param $list (ref $list)) (result (ref any))
-    (struct.get $list $value (local.get $list))
+    (ref.as_non_null (struct.get $list $value (local.get $list)))
   )
 
-  (func $list_tail (param $list (ref $list)) (result (ref null $list))
-    (struct.get $list $tail (local.get $list))
+  (func $list_tail (param $list (ref $list)) (result (ref $list))
+    (ref.as_non_null (struct.get $list $tail (local.get $list)))
   )
 
-  (func $list_is_empty (param $list (ref null $list)) (result i32)
-    (ref.is_null (local.get $list))
+  (func $list_is_empty (param $list (ref $list)) (result i32)
+    (ref.is_null (struct.get $list $value (local.get $list)))
   )
 
   ;; -- Int implementation: boxed i64 --

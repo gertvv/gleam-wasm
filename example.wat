@@ -9,7 +9,7 @@
 
   (type $gleam/List
     (struct
-      (field $value (ref any))
+      (field $value (ref null any))
       (field $tail (ref null $gleam/List))
     )
   )
@@ -17,8 +17,8 @@
   (type $gleam/Int (struct i64))
 
   (import "gleam" "list_head" (func $gleam/list_head (param $list (ref $gleam/List)) (result (ref any))))
-  (import "gleam" "list_tail" (func $gleam/list_tail (param $list (ref $gleam/List)) (result (ref null $gleam/List))))
-  (import "gleam" "list_is_empty" (func $gleam/list_is_empty (param $list (ref null $gleam/List)) (result i32)))
+  (import "gleam" "list_tail" (func $gleam/list_tail (param $list (ref $gleam/List)) (result (ref $gleam/List))))
+  (import "gleam" "list_is_empty" (func $gleam/list_is_empty (param $list (ref $gleam/List)) (result i32)))
   (import "gleam" "int_box" (func $gleam/int_box (param $value i64) (result (ref $gleam/Int))))
   (import "gleam" "int_unbox" (func $gleam/int_unbox (param $boxed (ref any)) (result i64)))
 
@@ -43,7 +43,7 @@
   )
 
   (func $fold
-    (param $l (ref null $gleam/List))
+    (param $l (ref $gleam/List))
     (param $i (ref any))
     (param $f (ref $closure:0.1:0))
     (result (ref any))
