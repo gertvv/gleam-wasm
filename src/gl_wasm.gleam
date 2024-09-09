@@ -71,7 +71,7 @@ fn compile_function(
           wat.WatVariableDefinition(name, typeref)
         })
       let functions = dict.insert(state.defined_functions, name, func_type)
-      use #(state, body) <- result.try(compile_body(
+      use #(state, body) <- result.try(expression_compiler.compile_body(
         body,
         compiler.with_params(
           compiler.new_local_state(
@@ -107,39 +107,6 @@ fn compile_function(
         ),
       )
     }
-  }
-}
-
-fn compile_body(
-  body: List(Statement),
-  state: LocalState,
-) -> Result(#(LocalState, List(wat.WatExpression)), CompilerError) {
-  let last = list.length(body) - 1
-  list.index_map(body, fn(stmt, index) { #(stmt, index == last) })
-  |> list.try_fold(#(state, []), fn(acc, item) {
-    let #(stmt, tail) = item
-    let #(state, compiled) = acc
-    compile_statement(stmt, tail, state)
-    |> result.map(fn(expr_state) {
-      #(expr_state.local, [expr_state.compiled, ..compiled])
-    })
-  })
-  |> result.map(fn(res) {
-    let #(state, compiled) = res
-    #(state, list.reverse(compiled))
-  })
-}
-
-fn compile_statement(
-  stmt: Statement,
-  tail: Bool,
-  state: LocalState,
-) -> Result(ExpressionState, CompilerError) {
-  case stmt {
-    glance.Expression(expr) ->
-      expression_compiler.compile_expression(expr, state, tail)
-    glance.Use(_, _) -> todo
-    glance.Assignment(_, _, _, _) -> todo
   }
 }
 

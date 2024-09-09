@@ -5,7 +5,10 @@ fn add(a: Int, b: Int) -> Int {
 fn fold(list: List(a), initial: acc, fun: fn(acc, a) -> acc) -> acc {
   case list {
     [] -> initial
-    [x, ..rest] -> fold(rest, fun(initial, x), fun)
+    [x, ..rest] -> {
+      let intermediate = fun(initial, x)
+      fold(rest, intermediate, fun)
+    }
   }
 }
 

@@ -1,22 +1,27 @@
-import simplifile.{type FileError}
-import gleam/dict.{type Dict}
 import glance.{type Expression, type Type}
+import gleam/dict.{type Dict}
+import gleam/list
+import gleam/option.{None}
+import gleam/result
+import gleam/set.{type Set}
+import gloml
+import simplifile.{type FileError}
 import wat.{
   type WatDefinition, type WatExpression, type WatFunctionType, type WatType,
 }
-import gleam/option.{None}
-import gleam/list
-import gleam/result
-import gleam/set.{type Set}
 
 pub type CompilerError {
   FileError(error: FileError)
+  PackageTomlError(error: gloml.DecodeError)
+  CircularDependencyError
   ParseError(error: glance.Error)
   SyntaxError(error: String)
   ReferenceError(name: String)
   TypeError(expression: Expression, expected_type: Type, actual_type: Type)
   NotAFunctionError(expression: Expression)
   ArityError(expression: Expression, expected_number: Int, actual_number: Int)
+  TypeArityError(type_: Type, expected_number: Int, actual_number: Int)
+  AnotherTypeError
 }
 
 pub type FunctionImport {

@@ -1,5 +1,5 @@
 import compiler.{type CompilerError, type ExpressionState, type LocalState}
-import glance.{type Clause, type Expression, type Type}
+import glance.{type Clause, type Expression, type Statement, type Type}
 import gleam/dict.{type Dict}
 import gleam/float
 import gleam/int
@@ -10,6 +10,50 @@ import gleam/result
 import signature_encoder
 import type_compiler
 import wat
+
+pub fn compile_body(
+  body: List(Statement),
+  state: LocalState,
+) -> Result(#(LocalState, List(wat.WatExpression)), CompilerError) {
+  let last = list.length(body) - 1
+  list.index_map(body, fn(stmt, index) { #(stmt, index == last) })
+  |> list.try_fold(#(state, []), fn(acc, item) {
+    let #(stmt, tail) = item
+    let #(state, compiled) = acc
+    compile_statement(stmt, tail, state)
+    |> result.map(fn(expr_state) {
+      #(expr_state.local, [expr_state.compiled, ..compiled])
+    })
+  })
+  |> result.map(fn(res) {
+    let #(state, compiled) = res
+    #(state, list.reverse(compiled))
+  })
+}
+
+pub fn compile_statement(
+  stmt: Statement,
+  tail: Bool,
+  state: LocalState,
+) -> Result(ExpressionState, CompilerError) {
+  case stmt {
+    glance.Expression(expr) -> compile_expression(expr, state, tail)
+    glance.Use(_, _) -> todo
+    glance.Assignment(glance.Let, glance.PatternVariable(name), _, expr) -> {
+      use state <- result.map(compile_expression(expr, state, tail))
+      case tail {
+        True -> state
+        False ->
+          compiler.ExpressionState(
+            ..state,
+            local: compiler.with_locals(state.local, [#(name, state.type_)]),
+            compiled: wat.LocalSet(name, state.compiled),
+          )
+      }
+    }
+    glance.Assignment(_, _, _, _) -> todo
+  }
+}
 
 fn generate_call_import(
   state: LocalState,
@@ -255,8 +299,7 @@ fn wrap_primitive_function(
         compiled: compiled,
         local: compiler.LocalState(
           ..local_state,
-          anon_fn_count: state.local.anon_fn_count
-          + 1,
+          anon_fn_count: state.local.anon_fn_count + 1,
           global: compiler.GlobalState(
             ..local_state.global,
             defined_types: dict.merge(
@@ -469,8 +512,9 @@ fn resolve_types(a: Type, b: Type) -> Result(Type, Nil) {
     a, b if a == b -> Ok(a)
     a, glance.HoleType(_) -> Ok(a)
     glance.HoleType(_), b -> Ok(b)
-    glance.NamedType(na, ma, pa), glance.NamedType(nb, mb, pb) if na == nb
-      && ma == mb ->
+    glance.NamedType(na, ma, pa), glance.NamedType(nb, mb, pb)
+      if na == nb && ma == mb
+    ->
       list.map2(pa, pb, fn(a, b) { #(a, b) })
       |> list.try_map(fn(pair) { resolve_types(pair.0, pair.1) })
       |> result.try(fn(params) {
@@ -596,6 +640,17 @@ pub fn compile_expression(
           Ok(compiler.ExpressionState(state, wat.RefFunc(name), type_, tail))
         _, _ -> Error(compiler.ReferenceError(name))
       }
+    glance.Block(body) -> {
+      let vars = state.in_scope_variables
+      use #(state, exprs) <- result.map(compile_body(body, state))
+      // TODO: proper typing
+      compiler.ExpressionState(
+        compiler.LocalState(..state, in_scope_variables: vars),
+        wat.Block(exprs),
+        glance.HoleType(""),
+        tail,
+      )
+    }
     glance.List([], None) ->
       Ok(compiler.ExpressionState(
         state,
@@ -668,8 +723,7 @@ pub fn compile_expression(
           compiler.ExpressionState(
             compiler.LocalState(
               ..state.local,
-              case_count: state.local.case_count
-              + 1,
+              case_count: state.local.case_count + 1,
             ),
             wat.Block(list.append(compiled_initializers, [state.compiled])),
             state.type_,
