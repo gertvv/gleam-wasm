@@ -4,6 +4,7 @@ import gleam/dict.{type Dict}
 import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/pair
 import gleam/result
 import gleam/string
 import project.{type Project, type SourceLocation}
@@ -13,7 +14,6 @@ pub type TypeId {
 }
 
 // fully resolved types
-// TODO: should more be done to CustomTypes? Like identify any common fields, and define constructors?
 pub type TypeDefinition {
   CustomType(
     id: TypeId,
@@ -197,20 +197,59 @@ pub fn resolve_custom_type(
   |> result.map(fn(type_) { #(parsed.definition.name, type_) })
 }
 
+fn attempt_resolve_types(
+  custom_types: List(glance.Definition(glance.CustomType)),
+  internals: ModuleInternals,
+) {
+  list.fold(custom_types, #(internals, []), fn(acc, custom_type) {
+    let #(internals, errors) = acc
+    resolve_custom_type(
+      internals,
+      custom_type,
+    )
+    |> result.map_error(fn(err) {
+      #(internals, [#(custom_type, err), ..errors])
+    })
+    |> result.map(fn(type_) {
+      #(
+        ModuleInternals(
+          ..internals,
+          types: dict.insert(internals.types, type_.0, type_.1),
+        ),
+        errors,
+      )
+    })
+    |> result.unwrap_both()
+  })
+}
+
+// TODO: types can be mutually recursive so another strategy is needed
+// I think we can define type identities ahead of time
+fn attempt_resolve_types_recursive(
+  custom_types: List(glance.Definition(glance.CustomType)),
+  internals: ModuleInternals,
+) {
+  case attempt_resolve_types(custom_types, internals) {
+    #(internals, []) -> Ok(internals)
+    #(internals, errors) -> {
+      case list.map(errors, pair.first) {
+        remaining if remaining == custom_types ->
+          Error(compiler.AnotherTypeError)
+        // TODO: proper error
+        remaining -> attempt_resolve_types_recursive(remaining, internals)
+      }
+    }
+  }
+}
+
 // TODO: result type annotation
-// TODO: iteratively walk types
-fn resolve_types(
+pub fn resolve_types(
   project: Project,
   location: SourceLocation,
   imports: Dict(String, Module),
   parsed: glance.Module,
 ) {
-  list.map(parsed.custom_types, resolve_custom_type(
-    ModuleInternals(project, location, imports, dict.new()),
-    _,
-  ))
-  |> result.all
-  |> result.map(dict.from_list)
+  attempt_resolve_types_recursive(parsed.custom_types, ModuleInternals(project, location, imports, dict.new()))
 }
 
 fn analyze_high_level(
@@ -218,11 +257,14 @@ fn analyze_high_level(
   location: SourceLocation,
   modules: Dict(SourceLocation, Module),
 ) -> Result(#(Module, Dict(SourceLocation, Module)), CompilerError) {
+  // check if the module has already been analyzed
   use _ <- result.try_recover(
     dict.get(modules, location)
     |> result.map(fn(module) { #(module, modules) }),
   )
+  // otherwise attempt to parse the source
   use parsed <- result.try(project.parse_module(project, location))
+  // analyze all direct imports
   use #(imports, modules) <- result.try(
     list.try_fold(parsed.imports, #([], modules), fn(acc, import_) {
       let #(imports, modules) = acc
@@ -240,7 +282,8 @@ fn analyze_high_level(
           |> result.map(fn(location) {
             case alias {
               Some(glance.Named(alias)) -> #(alias, location)
-              Some(glance.Discarded(alias)) -> #(alias, location)
+              Some(glance.Discarded(alias)) -> todo
+              // not sure what this means
               None -> #(location.shorthand, location)
             }
           })
@@ -255,11 +298,10 @@ fn analyze_high_level(
     }),
   )
   let imports = dict.from_list(imports)
-  use types <- result.map(resolve_types(project, location, imports, parsed))
-  io.debug(types)
+  use internals <- result.map(resolve_types(project, location, imports, parsed))
   // TODO: resolve constants and functions
   // TODO: filter to only public parts
-  #(Module(location, imports, types), modules)
+  #(Module(location, imports, internals.types), modules)
 }
 
 pub fn analyze_module(
