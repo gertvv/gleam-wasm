@@ -5,6 +5,7 @@ import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import gleam/set
 import gleam/string
 import project.{type Project, type SourceLocation}
 
@@ -18,11 +19,16 @@ pub type TypeDefinition {
   CustomType(
     id: TypeId,
     publicity: glance.Publicity,
-    opaque_: Bool,
     parameters: List(String),
+    opaque_: Bool,
     variants: List(Variant),
   )
-  TypeAlias(id: TypeId, type_: TypeReference)
+  TypeAlias(
+    id: TypeId,
+    publicity: glance.Publicity,
+    parameters: List(String),
+    aliased: TypeReference,
+  )
 }
 
 pub type TypeReference {
@@ -93,16 +99,37 @@ pub type ModuleInternals {
   )
 }
 
+fn union_type_variables(ts: List(TypeReference)) -> set.Set(String) {
+  ts
+  |> list.map(find_type_variables)
+  |> list.fold(set.new(), set.union)
+}
+
+fn find_type_variables(t: TypeReference) -> set.Set(String) {
+  case t {
+    FunctionType(param_types, return_type) ->
+      union_type_variables([return_type, ..param_types])
+    IdentifiedType(_, assigned_types) ->
+      union_type_variables(dict.values(assigned_types))
+    ListType(item_type) -> find_type_variables(item_type)
+    TupleType(item_types) -> union_type_variables(item_types)
+    VariableType(name) -> set.from_list([name])
+    _ -> set.new()
+  }
+}
+
 pub fn resolve_type(
   data: ModuleInternals,
-  parameters: List(String),
+  prototypes: Dict(String, Prototype),
   declared_type: glance.Type,
 ) -> Result(TypeReference, CompilerError) {
+  io.debug("-- resolve_type --")
+  io.debug(declared_type)
   case declared_type {
     glance.NamedType(name, module_option, params) -> {
       let candidate = case module_option {
         None ->
-          dict.get(data.types, name)
+          dict.get(prototypes, name)
           |> result.map_error(fn(_) { compiler.ReferenceError(name) })
         Some(module_alias) ->
           dict.get(data.imports, module_alias)
@@ -111,11 +138,12 @@ pub fn resolve_type(
             dict.get(module.types, name)
             |> result.map_error(fn(_) { compiler.ReferenceError(name) })
           })
+          |> result.map(fn(def) { Prototype(def.id, def.parameters) })
       }
       case candidate {
         Ok(candidate_type) -> {
           case candidate_type, params {
-            CustomType(parameters: exp_params, ..), act_params -> {
+            Prototype(parameters: exp_params, ..), act_params -> {
               list.strict_zip(exp_params, act_params)
               |> result.map_error(fn(_) {
                 compiler.TypeArityError(
@@ -126,14 +154,13 @@ pub fn resolve_type(
               })
               |> result.try(list.try_map(_, fn(pair) {
                 let #(param_name, param_type) = pair
-                resolve_type(data, parameters, param_type)
+                resolve_type(data, prototypes, param_type)
                 |> result.map(fn(resolved) { #(param_name, resolved) })
               }))
               |> result.map(fn(mappings) {
                 IdentifiedType(candidate_type.id, dict.from_list(mappings))
               })
             }
-            _, _ -> todo
           }
         }
         Error(e) ->
@@ -142,48 +169,75 @@ pub fn resolve_type(
             "Float", None, [] -> Ok(FloatType)
             "String", None, [] -> Ok(StringType)
             "List", None, [item_type] ->
-              resolve_type(data, [], item_type)
+              resolve_type(data, prototypes, item_type)
               |> result.map(fn(resolved) { ListType(resolved) })
             _, _, _ -> Error(e)
           }
       }
     }
-    glance.VariableType(name) -> {
-      case list.contains(parameters, name) {
-        True -> Ok(VariableType(name))
-        False -> Error(compiler.ReferenceError(name))
+    glance.TupleType(_) -> {
+      todo
+    }
+    glance.FunctionType(function_parameters, return) -> {
+      let resolved_parameters =
+        list.try_map(function_parameters, resolve_type(data, prototypes, _))
+      let resolved_return = resolve_type(data, prototypes, return)
+      case resolved_parameters, resolved_return {
+        Ok(p), Ok(r) -> Ok(FunctionType(p, r))
+        Error(e), _ -> Error(e)
+        _, Error(e) -> Error(e)
       }
     }
-    _ -> todo
+    glance.VariableType(name) -> Ok(VariableType(name))
+    glance.HoleType(_) -> {
+      todo
+    }
   }
 }
 
 fn resolve_variant_field(
   data: ModuleInternals,
-  parameters: List(String),
+  prototypes: Dict(String, Prototype),
+  parameters: set.Set(String),
   field: glance.Field(glance.Type),
 ) -> Result(Field(TypeReference), CompilerError) {
-  resolve_type(data, parameters, field.item)
+  resolve_type(data, prototypes, field.item)
+  |> result.try(fn(t) {
+    let undeclared =
+      find_type_variables(t) |> set.difference(parameters) |> set.to_list
+    case undeclared {
+      [] -> Ok(t)
+      [u, ..] -> Error(compiler.ReferenceError(u))
+    }
+  })
   |> result.map(Field(field.label, _))
 }
 
 fn resolve_variant(
   data: ModuleInternals,
-  parameters: List(String),
+  prototypes: Dict(String, Prototype),
+  parameters: set.Set(String),
   variant: glance.Variant,
 ) -> Result(Variant, CompilerError) {
-  list.map(variant.fields, resolve_variant_field(data, parameters, _))
+  list.map(variant.fields, resolve_variant_field(
+    data,
+    prototypes,
+    parameters,
+    _,
+  ))
   |> result.all
   |> result.map(Variant(variant.name, _))
 }
 
 pub fn resolve_custom_type(
   data: ModuleInternals,
+  prototypes: Dict(String, Prototype),
   parsed: glance.Definition(glance.CustomType),
 ) -> Result(#(String, TypeDefinition), CompilerError) {
   list.map(parsed.definition.variants, resolve_variant(
     data,
-    parsed.definition.parameters,
+    prototypes,
+    set.from_list(parsed.definition.parameters),
     _,
   ))
   |> result.all
@@ -197,18 +251,56 @@ pub fn resolve_custom_type(
   |> result.map(fn(type_) { #(parsed.definition.name, type_) })
 }
 
+pub type Prototype {
+  Prototype(id: TypeId, parameters: List(String))
+}
+
+fn prototype_type_alias(
+  loc: SourceLocation,
+  def: glance.Definition(glance.TypeAlias),
+) -> #(String, Prototype) {
+  case def {
+    glance.Definition(_, glance.TypeAlias(name: name, parameters: params, ..)) -> #(
+      name,
+      Prototype(TypeId(loc, name), params),
+    )
+  }
+}
+
+fn prototype_custom_type(
+  loc: SourceLocation,
+  def: glance.Definition(glance.CustomType),
+) -> #(String, Prototype) {
+  case def {
+    glance.Definition(_, glance.CustomType(name: name, parameters: params, ..)) -> #(
+      name,
+      Prototype(TypeId(loc, name), params),
+    )
+  }
+}
+
 // TODO: result type annotation
-// TODO: iteratively walk types
+// TODO: iteratively walk types -- or prescan them?
 fn resolve_types(
   project: Project,
   location: SourceLocation,
   imports: Dict(String, Module),
   parsed: glance.Module,
 ) {
+  let custom_prototypes =
+    parsed.custom_types
+    |> list.map(prototype_custom_type(location, _))
+  let alias_prototypes =
+    parsed.type_aliases |> list.map(prototype_type_alias(location, _))
+  let prototypes =
+    dict.from_list(list.append(custom_prototypes, alias_prototypes))
+  // TODO: resolve type aliases
   list.map(parsed.custom_types, resolve_custom_type(
     ModuleInternals(project, location, imports, dict.new()),
+    prototypes,
     _,
   ))
+  // TODO: ensure uniqueness?
   |> result.all
   |> result.map(dict.from_list)
 }
@@ -256,7 +348,8 @@ fn analyze_high_level(
   )
   let imports = dict.from_list(imports)
   use types <- result.map(resolve_types(project, location, imports, parsed))
-  io.debug(types)
+  io.debug("--- HERE ---")
+  io.debug(types |> dict.values() |> list.map(fn(t) { t.id }))
   // TODO: resolve constants and functions
   // TODO: filter to only public parts
   #(Module(location, imports, types), modules)
@@ -307,6 +400,7 @@ pub fn main() {
       dict.new(),
     )
   })
+  |> io.debug()
   |> result.map(to_dep_tree)
   |> result.map(print_dep_tree(_, ""))
   |> result.map(io.println)

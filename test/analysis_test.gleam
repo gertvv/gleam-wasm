@@ -16,35 +16,35 @@ pub fn resolve_basic_types_test() {
 
   analysis.resolve_type(
     analysis.ModuleInternals(project, location, dict.new(), default_types),
-    [],
+    dict.new(),
     glance.NamedType("Int", None, []),
   )
   |> should.equal(Ok(analysis.IntType))
 
   analysis.resolve_type(
     analysis.ModuleInternals(project, location, dict.new(), default_types),
-    [],
+    dict.new(),
     glance.NamedType("Float", None, []),
   )
   |> should.equal(Ok(analysis.FloatType))
 
   analysis.resolve_type(
     analysis.ModuleInternals(project, location, dict.new(), default_types),
-    [],
+    dict.new(),
     glance.NamedType("MyFloat", None, []),
   )
   |> should.equal(Error(compiler.ReferenceError("MyFloat")))
 
   analysis.resolve_type(
     analysis.ModuleInternals(project, location, dict.new(), default_types),
-    [],
+    dict.new(),
     glance.NamedType("List", None, [glance.NamedType("Int", None, [])]),
   )
   |> should.equal(Ok(analysis.ListType(analysis.IntType)))
 
   analysis.resolve_type(
     analysis.ModuleInternals(project, location, dict.new(), default_types),
-    [],
+    dict.new(),
     glance.NamedType("List", None, [glance.NamedType("MyFloat", None, [])]),
   )
   |> should.equal(Error(compiler.ReferenceError("MyFloat")))
@@ -73,7 +73,7 @@ pub fn resolve_basic_types_test() {
       dict.new(),
       dict.insert(default_types, "CustomType", generic_custom_type),
     ),
-    [],
+    dict.new(),
     glance.NamedType("CustomType", None, [
       glance.NamedType("Float", None, []),
       glance.NamedType("Int", None, []),
@@ -93,7 +93,7 @@ pub fn resolve_basic_types_test() {
       dict.new(),
       dict.insert(default_types, "CustomType", generic_custom_type),
     ),
-    ["x"],
+    dict.new(),
     glance.NamedType("CustomType", None, [
       glance.VariableType("x"),
       glance.NamedType("Int", None, []),
@@ -116,7 +116,7 @@ pub fn resolve_basic_types_test() {
       dict.new(),
       dict.insert(default_types, "CustomType", generic_custom_type),
     ),
-    ["x"],
+    dict.new(),
     glance.NamedType("CustomType", None, [glance.VariableType("x")]),
   )
   |> should.equal(
@@ -126,20 +126,5 @@ pub fn resolve_basic_types_test() {
       1,
     )),
   )
-
-  analysis.resolve_type(
-    analysis.ModuleInternals(
-      project,
-      location,
-      dict.new(),
-      dict.insert(default_types, "CustomType", generic_custom_type),
-    ),
-    ["x"],
-    glance.NamedType("CustomType", None, [
-      glance.VariableType("y"),
-      glance.NamedType("Int", None, []),
-    ]),
-  )
-  |> should.equal(Error(compiler.ReferenceError("y")))
 }
 // TODO: resolve recursive CustomType
