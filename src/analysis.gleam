@@ -14,7 +14,6 @@ pub type TypeId {
 }
 
 // fully resolved types
-// TODO: should more be done to CustomTypes? Like identify any common fields, and define constructors?
 pub type TypeDefinition {
   CustomType(
     id: TypeId,
@@ -280,8 +279,7 @@ fn prototype_custom_type(
 }
 
 // TODO: result type annotation
-// TODO: iteratively walk types -- or prescan them?
-fn resolve_types(
+pub fn resolve_types(
   project: Project,
   location: SourceLocation,
   imports: Dict(String, Module),
