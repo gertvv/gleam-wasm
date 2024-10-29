@@ -272,3 +272,120 @@ pub fn resolve_dependent_custom_types_test() {
     ),
   )
 }
+
+pub fn resolve_type_aliases_test() {
+  let project =
+    project.Project("test", dict.new(), fn(_a, _b) {
+      Error(compiler.ReferenceError("foo"))
+    })
+  let location = project.SourceLocation("test", "bar", "bar")
+
+  analysis.resolve_types(
+    project,
+    location,
+    dict.new(),
+    glance.Module(
+      imports: [],
+      custom_types: [],
+      type_aliases: [
+        glance.Definition(
+          [],
+          glance.TypeAlias("Alias", glance.Public, [], compiler.int_type),
+        ),
+      ],
+      constants: [],
+      functions: [],
+    ),
+  )
+  |> should.equal(
+    Ok(
+      dict.from_list([
+        #(
+          "Alias",
+          analysis.TypeAlias(
+            analysis.TypeId(location, "Alias"),
+            glance.Public,
+            [],
+            analysis.IntType,
+          ),
+        ),
+      ]),
+    ),
+  )
+
+  analysis.resolve_types(
+    project,
+    location,
+    dict.new(),
+    glance.Module(
+      imports: [],
+      custom_types: [],
+      type_aliases: [
+        glance.Definition(
+          [],
+          glance.TypeAlias(
+            "Alias",
+            glance.Public,
+            [],
+            compiler.list_type(compiler.int_type),
+          ),
+        ),
+      ],
+      constants: [],
+      functions: [],
+    ),
+  )
+  |> should.equal(
+    Ok(
+      dict.from_list([
+        #(
+          "Alias",
+          analysis.TypeAlias(
+            analysis.TypeId(location, "Alias"),
+            glance.Public,
+            [],
+            analysis.ListType(analysis.IntType),
+          ),
+        ),
+      ]),
+    ),
+  )
+
+  analysis.resolve_types(
+    project,
+    location,
+    dict.new(),
+    glance.Module(
+      imports: [],
+      custom_types: [],
+      type_aliases: [
+        glance.Definition(
+          [],
+          glance.TypeAlias(
+            "Alias",
+            glance.Public,
+            ["a"],
+            compiler.list_type(glance.VariableType("a")),
+          ),
+        ),
+      ],
+      constants: [],
+      functions: [],
+    ),
+  )
+  |> should.equal(
+    Ok(
+      dict.from_list([
+        #(
+          "Alias",
+          analysis.TypeAlias(
+            analysis.TypeId(location, "Alias"),
+            glance.Public,
+            ["a"],
+            analysis.ListType(analysis.VariableType("a")),
+          ),
+        ),
+      ]),
+    ),
+  )
+}

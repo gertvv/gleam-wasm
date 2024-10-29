@@ -7,6 +7,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set
 import gleam/string
+import pprint
 import project.{type Project, type SourceLocation}
 
 pub type TypeId {
@@ -14,6 +15,8 @@ pub type TypeId {
 }
 
 // fully resolved types
+
+// TODO: do I need to put the TypeId on the type definition itself??
 pub type TypeDefinition {
   CustomType(
     id: TypeId,
@@ -59,6 +62,7 @@ pub type Analysis {
 
 // Will include only high level type information and signatures
 pub type Module {
+  // TODO: replace Module by SourceLocation for the imports
   Module(
     location: SourceLocation,
     imports: Dict(String, Module),
@@ -122,8 +126,6 @@ pub fn resolve_type(
   prototypes: Dict(String, Prototype),
   declared_type: glance.Type,
 ) -> Result(TypeReference, CompilerError) {
-  io.debug("-- resolve_type --")
-  io.debug(declared_type)
   case declared_type {
     glance.NamedType(name, module_option, params) -> {
       let candidate = case module_option {
@@ -250,6 +252,25 @@ pub fn resolve_custom_type(
   |> result.map(fn(type_) { #(parsed.definition.name, type_) })
 }
 
+fn resolve_type_alias(
+  data: ModuleInternals,
+  prototypes: Dict(String, Prototype),
+  parsed: glance.Definition(glance.TypeAlias),
+) -> Result(#(String, TypeDefinition), CompilerError) {
+  resolve_type(data, prototypes, parsed.definition.aliased)
+  |> result.map(fn(resolved) {
+    #(
+      parsed.definition.name,
+      TypeAlias(
+        TypeId(data.location, parsed.definition.name),
+        parsed.definition.publicity,
+        parsed.definition.parameters,
+        resolved,
+      ),
+    )
+  })
+}
+
 pub type Prototype {
   Prototype(id: TypeId, parameters: List(String))
 }
@@ -278,13 +299,12 @@ fn prototype_custom_type(
   }
 }
 
-// TODO: result type annotation
 pub fn resolve_types(
   project: Project,
   location: SourceLocation,
   imports: Dict(String, Module),
   parsed: glance.Module,
-) {
+) -> Result(Dict(String, TypeDefinition), CompilerError) {
   let custom_prototypes =
     parsed.custom_types
     |> list.map(prototype_custom_type(location, _))
@@ -292,13 +312,13 @@ pub fn resolve_types(
     parsed.type_aliases |> list.map(prototype_type_alias(location, _))
   let prototypes =
     dict.from_list(list.append(custom_prototypes, alias_prototypes))
-  // TODO: resolve type aliases
-  list.map(parsed.custom_types, resolve_custom_type(
-    ModuleInternals(project, location, imports, dict.new()),
-    prototypes,
-    _,
-  ))
+  let internals = ModuleInternals(project, location, imports, dict.new())
+  let aliases =
+    list.map(parsed.type_aliases, resolve_type_alias(internals, prototypes, _))
+  let custom_types =
+    list.map(parsed.custom_types, resolve_custom_type(internals, prototypes, _))
   // TODO: ensure uniqueness?
+  list.append(aliases, custom_types)
   |> result.all
   |> result.map(dict.from_list)
 }
@@ -346,8 +366,6 @@ fn analyze_high_level(
   )
   let imports = dict.from_list(imports)
   use types <- result.map(resolve_types(project, location, imports, parsed))
-  io.debug("--- HERE ---")
-  io.debug(types |> dict.values() |> list.map(fn(t) { t.id }))
   // TODO: resolve constants and functions
   // TODO: filter to only public parts
   #(Module(location, imports, types), modules)
@@ -398,7 +416,7 @@ pub fn main() {
       dict.new(),
     )
   })
-  |> io.debug()
+  |> pprint.debug()
   |> result.map(to_dep_tree)
   |> result.map(print_dep_tree(_, ""))
   |> result.map(io.println)
