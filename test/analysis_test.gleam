@@ -3,6 +3,7 @@ import compiler
 import glance
 import gleam/dict
 import gleam/option.{None, Some}
+import gleam/result
 import gleeunit/should
 import project
 
@@ -123,19 +124,19 @@ pub fn resolve_dependent_custom_types_test() {
       functions: [],
     ),
   )
-  |> should.equal(Ok(dict.new()))
+  |> should.equal(Ok(#(dict.new(), dict.new())))
 
   let b_depends_on_a =
     dict.from_list([
       #(
         "TypeA",
-        analysis.CustomType(glance.Public, [], False, [
+        analysis.CustomType([], False, [
           analysis.Variant("TypeA", [analysis.Field(None, int_type)]),
         ]),
       ),
       #(
         "TypeB",
-        analysis.CustomType(glance.Public, [], False, [
+        analysis.CustomType([], False, [
           analysis.Variant("TypeB", [
             analysis.Field(
               None,
@@ -177,6 +178,7 @@ pub fn resolve_dependent_custom_types_test() {
       functions: [],
     ),
   )
+  |> result.map(fn(r) { r.1 })
   |> should.equal(Ok(b_depends_on_a))
 
   analysis.resolve_types(
@@ -207,6 +209,7 @@ pub fn resolve_dependent_custom_types_test() {
       functions: [],
     ),
   )
+  |> result.map(fn(r) { r.1 })
   |> should.equal(Ok(b_depends_on_a))
 
   analysis.resolve_types(
@@ -233,12 +236,13 @@ pub fn resolve_dependent_custom_types_test() {
       functions: [],
     ),
   )
+  |> result.map(fn(r) { r.1 })
   |> should.equal(
     Ok(
       dict.from_list([
         #(
           "Tree",
-          analysis.CustomType(glance.Public, [], False, [
+          analysis.CustomType([], False, [
             analysis.Variant("Node", [
               analysis.Field(
                 Some("left"),
@@ -294,12 +298,9 @@ pub fn resolve_type_aliases_test() {
       functions: [],
     ),
   )
+  |> result.map(fn(r) { r.0 })
   |> should.equal(
-    Ok(
-      dict.from_list([
-        #("Alias", analysis.TypeAlias(glance.Public, [], int_type)),
-      ]),
-    ),
+    Ok(dict.from_list([#("Alias", analysis.GenericType(int_type, []))])),
   )
 
   analysis.resolve_types(
@@ -325,11 +326,10 @@ pub fn resolve_type_aliases_test() {
       functions: [],
     ),
   )
+  |> result.map(fn(r) { r.0 })
   |> should.equal(
     Ok(
-      dict.from_list([
-        #("Alias", analysis.TypeAlias(glance.Public, [], list_type(int_type))),
-      ]),
+      dict.from_list([#("Alias", analysis.GenericType(list_type(int_type), []))]),
     ),
   )
 
@@ -356,16 +356,13 @@ pub fn resolve_type_aliases_test() {
       functions: [],
     ),
   )
+  |> result.map(fn(r) { r.0 })
   |> should.equal(
     Ok(
       dict.from_list([
         #(
           "Alias",
-          analysis.TypeAlias(
-            glance.Public,
-            ["a"],
-            list_type(analysis.VariableType("a")),
-          ),
+          analysis.GenericType(list_type(analysis.VariableType("a")), ["a"]),
         ),
       ]),
     ),

@@ -18,20 +18,8 @@ pub type TypeId {
 
 // fully resolved types
 
-// TODO: keep TypeAlias here or can we have just CustomType?
-// TODO: take publicity out?
-pub type TypeDefinition {
-  CustomType(
-    publicity: glance.Publicity,
-    parameters: List(String),
-    opaque_: Bool,
-    variants: List(Variant),
-  )
-  TypeAlias(
-    publicity: glance.Publicity,
-    parameters: List(String),
-    aliased: Type,
-  )
+pub type CustomType {
+  CustomType(parameters: List(String), opaque_: Bool, variants: List(Variant))
 }
 
 // TODO: at the module level could use GenericType to represent either TypeAlias or CustomType
@@ -65,11 +53,13 @@ pub type Analysis {
 }
 
 // Will include only high level type information and signatures
+// TODO: split declared type names from custom type definitions
 pub type Module {
   Module(
     location: ModuleId,
     imports: Dict(String, ModuleId),
-    types: Dict(String, TypeDefinition),
+    types: Dict(String, GenericType),
+    custom_types: Dict(String, CustomType),
   )
 }
 
@@ -329,7 +319,7 @@ pub type ModuleInternals {
     project: Project,
     location: ModuleId,
     imports: Dict(String, Module),
-    types: Dict(String, TypeDefinition),
+    types: Dict(String, GenericType),
   )
 }
 
@@ -465,7 +455,7 @@ pub fn resolve_custom_type(
   data: ModuleInternals,
   prototypes: Dict(String, Prototype),
   parsed: glance.Definition(glance.CustomType),
-) -> Result(#(String, TypeDefinition), CompilerError) {
+) -> Result(#(String, CustomType), CompilerError) {
   list.map(parsed.definition.variants, resolve_variant(
     data,
     prototypes,
@@ -474,7 +464,6 @@ pub fn resolve_custom_type(
   ))
   |> result.all
   |> result.map(CustomType(
-    publicity: parsed.definition.publicity,
     opaque_: parsed.definition.opaque_,
     parameters: parsed.definition.parameters,
     variants: _,
@@ -482,21 +471,16 @@ pub fn resolve_custom_type(
   |> result.map(fn(type_) { #(parsed.definition.name, type_) })
 }
 
-// TODO: keep a TypeAlias as a TypeId reference or substitute it?
 fn resolve_type_alias(
   data: ModuleInternals,
   prototypes: Dict(String, Prototype),
   parsed: glance.Definition(glance.TypeAlias),
-) -> Result(#(String, TypeDefinition), CompilerError) {
+) -> Result(#(String, GenericType), CompilerError) {
   resolve_type(data, prototypes, parsed.definition.aliased)
   |> result.map(fn(resolved) {
     #(
       parsed.definition.name,
-      TypeAlias(
-        parsed.definition.publicity,
-        parsed.definition.parameters,
-        resolved,
-      ),
+      GenericType(resolved, parsed.definition.parameters),
     )
   })
 }
@@ -527,13 +511,17 @@ fn prototype_custom_type(
   }
 }
 
+// TODO: split into one for aliases and one for custom types
 pub fn resolve_types(
   project: Project,
   location: ModuleId,
   imports: Dict(String, ModuleId),
   modules: Dict(ModuleId, Module),
   parsed: glance.Module,
-) -> Result(Dict(String, TypeDefinition), CompilerError) {
+) -> Result(
+  #(Dict(String, GenericType), Dict(String, CustomType)),
+  CompilerError,
+) {
   let custom_prototypes =
     parsed.custom_types
     |> list.map(prototype_custom_type)
@@ -548,14 +536,37 @@ pub fn resolve_types(
     })
   let internals =
     ModuleInternals(project, location, imported_modules, dict.new())
-  let aliases =
-    list.map(parsed.type_aliases, resolve_type_alias(internals, prototypes, _))
-  let custom_types =
-    list.map(parsed.custom_types, resolve_custom_type(internals, prototypes, _))
+
+  use aliases <- result.try(
+    result.all(
+      list.map(parsed.type_aliases, resolve_type_alias(internals, prototypes, _)),
+    ),
+  )
+  use custom_types <- result.map(
+    result.all(
+      list.map(parsed.custom_types, resolve_custom_type(
+        internals,
+        prototypes,
+        _,
+      )),
+    ),
+  )
+
+  let custom_types_generic =
+    dict.map_values(dict.from_list(custom_types), fn(name, custom_type) {
+      GenericType(
+        IdentifiedType(
+          ModuleType(location, name),
+          custom_type.parameters |> list.map(VariableType(_)),
+        ),
+        custom_type.parameters,
+      )
+    })
   // TODO: ensure uniqueness?
-  list.append(aliases, custom_types)
-  |> result.all
-  |> result.map(dict.from_list)
+  #(
+    dict.merge(dict.from_list(aliases), custom_types_generic),
+    dict.from_list(custom_types),
+  )
 }
 
 fn analyze_high_level(
@@ -603,7 +614,7 @@ fn analyze_high_level(
     }),
   )
   let imports = dict.from_list(imports)
-  use types <- result.map(resolve_types(
+  use #(types, custom_types) <- result.map(resolve_types(
     project,
     location,
     imports,
@@ -612,7 +623,7 @@ fn analyze_high_level(
   ))
   // TODO: resolve constants and functions
   // TODO: filter to only public parts
-  #(Module(location, imports, types), modules)
+  #(Module(location, imports, types, custom_types), modules)
 }
 
 pub fn analyze_module(
