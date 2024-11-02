@@ -16,8 +16,7 @@ pub type Project {
   Project(
     name: String,
     packages: Dict(String, Package),
-    parse_module: fn(Project, SourceLocation) ->
-      Result(glance.Module, CompilerError),
+    parse_module: fn(Project, ModuleId) -> Result(glance.Module, CompilerError),
   )
 }
 
@@ -31,9 +30,12 @@ pub type Package {
   OtherPackage(name: String, source_path: String)
 }
 
-// TODO: rename to ModuleId?
-pub type SourceLocation {
-  SourceLocation(package_name: String, module_path: String, shorthand: String)
+pub type ModuleId {
+  SourceLocation(package_name: String, module_path: String)
+}
+
+pub fn shorthand(loc: ModuleId) -> String {
+  filepath.base_name(loc.module_path)
 }
 
 fn parse_gleam_toml(source_path: String) {
@@ -138,7 +140,7 @@ pub fn main() {
   |> io.debug
 }
 
-fn as_path(project: Project, location: SourceLocation) -> String {
+fn as_path(project: Project, location: ModuleId) -> String {
   case location.package_name == project.name {
     True -> ["src", location.module_path <> ".gleam"]
     False -> [
@@ -154,7 +156,7 @@ fn as_path(project: Project, location: SourceLocation) -> String {
 
 fn parse_module(
   project: Project,
-  location: SourceLocation,
+  location: ModuleId,
 ) -> Result(glance.Module, CompilerError) {
   simplifile.read(as_path(project, location))
   |> result.map_error(compiler.FileError)
@@ -168,11 +170,11 @@ pub fn get_module_location(
   project: Project,
   package_name: String,
   path: String,
-) -> Result(SourceLocation, Nil) {
+) -> Result(ModuleId, Nil) {
   case dict.get(project.packages, package_name) {
     Ok(GleamPackage(modules: modules, ..)) ->
       case set.contains(modules, path) {
-        True -> Ok(SourceLocation(package_name, path, filepath.base_name(path)))
+        True -> Ok(SourceLocation(package_name, path))
         False -> Error(Nil)
       }
     _ -> Error(Nil)
