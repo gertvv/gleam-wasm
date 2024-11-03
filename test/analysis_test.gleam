@@ -15,10 +15,10 @@ pub fn resolve_basic_types_test() {
   let location = project.SourceLocation("test", "bar")
   let default_types = dict.new()
 
-  let int_type = analysis.IdentifiedType(analysis.BuiltInType("Int"), [])
-  let float_type = analysis.IdentifiedType(analysis.BuiltInType("Float"), [])
+  let int_type = analysis.TypeConstructor(analysis.BuiltInType("Int"), [])
+  let float_type = analysis.TypeConstructor(analysis.BuiltInType("Float"), [])
   let list_type = fn(item_type) {
-    analysis.IdentifiedType(analysis.BuiltInType("List"), [item_type])
+    analysis.TypeConstructor(analysis.BuiltInType("List"), [item_type])
   }
 
   analysis.resolve_type(
@@ -56,7 +56,7 @@ pub fn resolve_basic_types_test() {
   )
   |> should.equal(Error(compiler.ReferenceError("MyFloat")))
 
-  let generic_custom_type_id = analysis.ModuleType(location, "CustomType")
+  let generic_custom_type_id = analysis.TypeFromModule(location, "CustomType")
   let generic_custom_type = analysis.Prototype(parameters: ["b", "c"])
 
   analysis.resolve_type(
@@ -68,7 +68,7 @@ pub fn resolve_basic_types_test() {
     ]),
   )
   |> should.equal(
-    Ok(analysis.IdentifiedType(generic_custom_type_id, [float_type, int_type])),
+    Ok(analysis.TypeConstructor(generic_custom_type_id, [float_type, int_type])),
   )
 
   analysis.resolve_type(
@@ -81,8 +81,8 @@ pub fn resolve_basic_types_test() {
   )
   |> should.equal(
     Ok(
-      analysis.IdentifiedType(generic_custom_type_id, [
-        analysis.VariableType("x"),
+      analysis.TypeConstructor(generic_custom_type_id, [
+        analysis.TypeVariable("x"),
         int_type,
       ]),
     ),
@@ -109,7 +109,7 @@ pub fn resolve_dependent_custom_types_test() {
     })
   let location = project.SourceLocation("test", "bar")
 
-  let int_type = analysis.IdentifiedType(analysis.BuiltInType("Int"), [])
+  let int_type = analysis.TypeConstructor(analysis.BuiltInType("Int"), [])
 
   analysis.resolve_types(
     project,
@@ -140,8 +140,8 @@ pub fn resolve_dependent_custom_types_test() {
           analysis.Variant("TypeB", [
             analysis.Field(
               None,
-              analysis.IdentifiedType(
-                analysis.ModuleType(location, "TypeA"),
+              analysis.TypeConstructor(
+                analysis.TypeFromModule(location, "TypeA"),
                 [],
               ),
             ),
@@ -246,15 +246,15 @@ pub fn resolve_dependent_custom_types_test() {
             analysis.Variant("Node", [
               analysis.Field(
                 Some("left"),
-                analysis.IdentifiedType(
-                  analysis.ModuleType(location, "Tree"),
+                analysis.TypeConstructor(
+                  analysis.TypeFromModule(location, "Tree"),
                   [],
                 ),
               ),
               analysis.Field(
                 Some("right"),
-                analysis.IdentifiedType(
-                  analysis.ModuleType(location, "Tree"),
+                analysis.TypeConstructor(
+                  analysis.TypeFromModule(location, "Tree"),
                   [],
                 ),
               ),
@@ -274,10 +274,10 @@ pub fn resolve_type_aliases_test() {
     })
   let location = project.SourceLocation("test", "bar")
 
-  let int_type = analysis.IdentifiedType(analysis.BuiltInType("Int"), [])
+  let int_type = analysis.TypeConstructor(analysis.BuiltInType("Int"), [])
 
   let list_type = fn(item_type) {
-    analysis.IdentifiedType(analysis.BuiltInType("List"), [item_type])
+    analysis.TypeConstructor(analysis.BuiltInType("List"), [item_type])
   }
 
   analysis.resolve_types(
@@ -362,7 +362,7 @@ pub fn resolve_type_aliases_test() {
       dict.from_list([
         #(
           "Alias",
-          analysis.GenericType(list_type(analysis.VariableType("a")), ["a"]),
+          analysis.GenericType(list_type(analysis.TypeVariable("a")), ["a"]),
         ),
       ]),
     ),
@@ -370,7 +370,7 @@ pub fn resolve_type_aliases_test() {
 }
 
 pub fn type_infer_function_test() {
-  let int_type = analysis.IdentifiedType(analysis.BuiltInType("Int"), [])
+  let int_type = analysis.TypeConstructor(analysis.BuiltInType("Int"), [])
   // fn(x, y) { x * y }
 
   let parsed_fn =
@@ -392,31 +392,32 @@ pub fn type_infer_function_test() {
   let fn_with_blanks =
     analysis.Fn(
       typ: analysis.FunctionType(
-        [analysis.VariableType("$3"), analysis.VariableType("$4")],
-        analysis.VariableType("$2"),
+        [analysis.TypeVariable("$3"), analysis.TypeVariable("$4")],
+        analysis.TypeVariable("$2"),
       ),
       argument_names: [glance.Named("x"), glance.Named("y")],
       body: [
         analysis.BinaryOperator(
-          analysis.VariableType("$2"),
+          analysis.TypeVariable("$2"),
           glance.MultInt,
-          analysis.Variable(analysis.VariableType("$3"), "x"),
-          analysis.Variable(analysis.VariableType("$4"), "y"),
+          analysis.Variable(analysis.TypeVariable("$3"), "x"),
+          analysis.Variable(analysis.TypeVariable("$4"), "y"),
         ),
       ],
     )
 
+  // TODO: from here adapt
   let constraints = [
     analysis.Equal(
-      analysis.VariableType("$1"),
+      analysis.TypeVariable("$1"),
       analysis.FunctionType(
-        [analysis.VariableType("$3"), analysis.VariableType("$4")],
-        analysis.VariableType("$2"),
+        [analysis.TypeVariable("$3"), analysis.TypeVariable("$4")],
+        analysis.TypeVariable("$2"),
       ),
     ),
-    analysis.Equal(analysis.VariableType("$2"), int_type),
-    analysis.Equal(int_type, analysis.VariableType("$4")),
-    analysis.Equal(int_type, analysis.VariableType("$3")),
+    analysis.Equal(analysis.TypeVariable("$2"), int_type),
+    analysis.Equal(int_type, analysis.TypeVariable("$4")),
+    analysis.Equal(int_type, analysis.TypeVariable("$3")),
   ]
 
   let substitution =
@@ -424,8 +425,8 @@ pub fn type_infer_function_test() {
       #(
         "$1",
         analysis.FunctionType(
-          [analysis.VariableType("$3"), analysis.VariableType("$4")],
-          analysis.VariableType("$2"),
+          [analysis.TypeVariable("$3"), analysis.TypeVariable("$4")],
+          analysis.TypeVariable("$2"),
         ),
       ),
       #("$2", int_type),
@@ -450,10 +451,128 @@ pub fn type_infer_function_test() {
   let #(context, initd_fn) =
     parsed_fn
     |> analysis.init_inference(
-      analysis.VariableType("$1"),
+      analysis.TypeVariable("$1"),
       dict.new(),
       analysis.Context(
-        dict.from_list([#("$1", analysis.VariableType("$1"))]),
+        dict.from_list([#("$1", analysis.TypeVariable("$1"))]),
+        [],
+        2,
+      ),
+    )
+
+  initd_fn |> should.equal(fn_with_blanks)
+  context.constraints |> should.equal(constraints)
+
+  let assert Ok(analysis.Context(subst, _, _)) =
+    context
+    |> analysis.solve_constraints
+
+  subst
+  |> should.equal(substitution)
+
+  fn_with_blanks
+  |> analysis.substitute_expression(substitution)
+  |> should.equal(typed_fn)
+}
+
+pub fn type_infer_function_using_import_test() {
+  let int_type = analysis.TypeConstructor(analysis.BuiltInType("Int"), [])
+  let string_type = analysis.TypeConstructor(analysis.BuiltInType("String"), [])
+  // fn(x) { int.to_string(x) }
+
+  let parsed_fn =
+    glance.Fn([glance.FnParameter(glance.Named("x"), None)], None, [
+      glance.Expression(
+        glance.Call(glance.FieldAccess(glance.Variable("int"), "to_string"), [
+          glance.Field(None, glance.Variable("x")),
+        ]),
+      ),
+    ])
+
+  let module_int =
+    analysis.Module(
+      project.SourceLocation("gleam_stdlib", "gleam/int"),
+      dict.new(),
+      dict.new(),
+      dict.new(),
+      dict.from_list([
+        #("to_string", analysis.FunctionType([int_type], string_type)),
+      ]),
+    )
+
+  let fn_with_blanks =
+    analysis.Fn(
+      typ: analysis.FunctionType(
+        [analysis.TypeVariable("$3")],
+        analysis.TypeVariable("$2"),
+      ),
+      argument_names: [glance.Named("x")],
+      body: [
+        analysis.Call(
+          analysis.FunctionReference(
+            analysis.FunctionType([int_type], string_type),
+            module_int.location,
+            "to_string",
+          ),
+          [analysis.Variable(analysis.TypeVariable("$3"), "x")],
+        ),
+      ],
+    )
+  let constraints = [
+    analysis.Equal(
+      analysis.TypeVariable("$1"),
+      analysis.FunctionType(
+        [analysis.TypeVariable("$3")],
+        analysis.TypeVariable("$2"),
+      ),
+    ),
+    analysis.Equal(analysis.TypeVariable("$4"), analysis.TypeVariable("$3")),
+    analysis.Equal(
+      analysis.FunctionType(
+        [analysis.TypeVariable("$4")],
+        analysis.TypeVariable("$2"),
+      ),
+      analysis.FunctionType([int_type], string_type),
+    ),
+  ]
+
+  let substitution =
+    dict.from_list([
+      #(
+        "$1",
+        analysis.FunctionType(
+          [analysis.TypeVariable("$3")],
+          analysis.TypeVariable("$2"),
+        ),
+      ),
+      #("$2", string_type),
+      #("$3", int_type),
+      #("$4", analysis.TypeVariable("$3")),
+    ])
+
+  let typed_fn =
+    analysis.Fn(
+      typ: analysis.FunctionType([int_type], string_type),
+      argument_names: [glance.Named("x")],
+      body: [
+        analysis.Call(
+          analysis.FunctionReference(
+            analysis.FunctionType([int_type], string_type),
+            module_int.location,
+            "to_string",
+          ),
+          [analysis.Variable(int_type, "x")],
+        ),
+      ],
+    )
+
+  let #(context, initd_fn) =
+    parsed_fn
+    |> analysis.init_inference(
+      analysis.TypeVariable("$1"),
+      dict.from_list([#("int", analysis.ModuleType(module_int))]),
+      analysis.Context(
+        dict.from_list([#("$1", analysis.TypeVariable("$1"))]),
         [],
         2,
       ),

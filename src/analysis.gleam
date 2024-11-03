@@ -13,7 +13,7 @@ import project.{type ModuleId, type Project}
 
 pub type TypeId {
   BuiltInType(name: String)
-  ModuleType(module: ModuleId, name: String)
+  TypeFromModule(module: ModuleId, name: String)
 }
 
 // fully resolved types
@@ -22,21 +22,18 @@ pub type CustomType {
   CustomType(parameters: List(String), opaque_: Bool, variants: List(Variant))
 }
 
-// TODO: at the module level could use GenericType to represent either TypeAlias or CustomType
-// but will need to keep track of the CustomTypes separately
 pub type GenericType {
   GenericType(typ: Type, parameters: List(String))
 }
 
 pub type Type {
-  // TODO: rename TypeConstructor
-  IdentifiedType(generic_type: TypeId, assigned_types: List(Type))
+  ModuleType(module: Module)
+  TypeConstructor(generic_type: TypeId, assigned_types: List(Type))
   // TODO: make TypeConstructor? (Add a TypeId constructor TupleType(arity))
   TupleType(elements: List(Type))
   // TODO: make TypeConstructor? (Add a TypeId constructor FunctionType(arity))
   FunctionType(parameters: List(Type), return: Type)
-  // TODO: rename TypeVariable
-  VariableType(name: String)
+  TypeVariable(name: String)
 }
 
 pub type Variant {
@@ -53,13 +50,14 @@ pub type Analysis {
 }
 
 // Will include only high level type information and signatures
-// TODO: split declared type names from custom type definitions
 pub type Module {
   Module(
     location: ModuleId,
     imports: Dict(String, ModuleId),
     types: Dict(String, GenericType),
     custom_types: Dict(String, CustomType),
+    // TODO: functions require more meta-data than just Type
+    functions: Dict(String, Type),
   )
 }
 
@@ -73,12 +71,15 @@ pub type Expression {
   Int(val: String)
   String(val: String)
   Variable(typ: Type, name: String)
+  FunctionReference(typ: Type, module: ModuleId, name: String)
   Fn(
     typ: Type,
     argument_names: List(glance.AssignmentName),
     body: List(Expression),
     // TODO: should take Statement instead
   )
+  FieldAccess(typ: Type, container: Expression, label: String)
+  Call(function: Expression, arguments: List(Expression))
   BinaryOperator(
     typ: Type,
     name: glance.BinaryOperator,
@@ -101,7 +102,7 @@ pub type Context {
 
 fn fresh_type_variable(context: Context) -> #(Context, Type) {
   let name = "$" <> int.to_string(context.next_variable)
-  let type_variable = VariableType(name)
+  let type_variable = TypeVariable(name)
   #(
     Context(
       dict.insert(context.substitution, name, type_variable),
@@ -140,6 +141,7 @@ fn add_substitution(context: Context, name: String, typ: Type) -> Context {
 
 // TODO: why not pass the environment via the context?
 // TODO: integrate with resolve_type
+// TODO: add modules and unqualified imports to the environment
 pub fn init_inference(
   expr: glance.Expression,
   expected_type: Type,
@@ -175,8 +177,56 @@ pub fn init_inference(
         Fn(fn_type, list.map(args, fn(arg) { arg.name }), [body]),
       )
     }
+    glance.Call(function, args) -> {
+      let #(context, arg_types) =
+        args
+        |> list.map_fold(from: context, with: fn(context, _) {
+          fresh_type_variable(context)
+        })
+      let fn_type = FunctionType(arg_types, expected_type)
+      let #(context, function) =
+        init_inference(function, fn_type, environment, context)
+      let #(context, args) =
+        list.zip(args, arg_types)
+        |> list.map_fold(from: context, with: fn(context, pair) {
+          let #(arg, arg_type) = pair
+          init_inference(arg.item, arg_type, environment, context)
+        })
+      #(context, Call(function, args))
+    }
+    glance.FieldAccess(container, label) -> {
+      // short-cut module field access if possible
+      case container {
+        glance.Variable(name) -> {
+          Ok(name)
+        }
+        _ -> Error(Nil)
+      }
+      |> result.try(dict.get(environment, _))
+      |> result.try(fn(val) {
+        case val {
+          ModuleType(module) -> Ok(module)
+          _ -> Error(Nil)
+        }
+      })
+      |> result.try(fn(module) {
+        dict.get(module.functions, label)
+        |> result.map(fn(function_type) {
+          #(
+            add_constraint(context, Equal(expected_type, function_type)),
+            FunctionReference(function_type, module.location, label),
+          )
+        })
+      })
+      |> result.lazy_unwrap(fn() {
+        let #(context, container_type) = fresh_type_variable(context)
+        let #(context, container) =
+          init_inference(container, container_type, environment, context)
+        todo
+      })
+    }
     glance.BinaryOperator(glance.MultInt, left, right) -> {
-      let int_type = IdentifiedType(BuiltInType("Int"), [])
+      let int_type = TypeConstructor(BuiltInType("Int"), [])
       let #(context, left) =
         init_inference(left, int_type, environment, context)
       let #(context, right) =
@@ -195,7 +245,7 @@ pub fn init_inference(
 
 pub fn get_sub(context: Context, t: Type) -> Option(Type) {
   case t {
-    VariableType(i) ->
+    TypeVariable(i) ->
       dict.get(context.substitution, i)
       |> result.map(Some)
       |> result.unwrap(None)
@@ -205,10 +255,11 @@ pub fn get_sub(context: Context, t: Type) -> Option(Type) {
 
 fn occurs_in(var: String, t: Type) -> Bool {
   case t {
-    VariableType(i) -> var == i
+    TypeVariable(i) -> var == i
     FunctionType(args, ret) -> list.any([ret, ..args], occurs_in(var, _))
-    IdentifiedType(_, sub) -> list.any(sub, occurs_in(var, _))
+    TypeConstructor(_, sub) -> list.any(sub, occurs_in(var, _))
     TupleType(args) -> list.any(args, occurs_in(var, _))
+    ModuleType(_) -> False
   }
 }
 
@@ -216,7 +267,7 @@ fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
   let sub_a = get_sub(context, a) |> option.unwrap(a)
   let sub_b = get_sub(context, b) |> option.unwrap(b)
   case a, b {
-    VariableType(i), VariableType(j) if i == j -> Ok(context)
+    TypeVariable(i), TypeVariable(j) if i == j -> Ok(context)
     FunctionType(args_i, ret_i), FunctionType(args_j, ret_j) -> {
       case list.length(args_i) == list.length(args_j) {
         False -> Error(compiler.AnotherTypeError)
@@ -228,14 +279,14 @@ fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
         }
       }
     }
-    VariableType(_), _ if sub_a != a -> unify(context, sub_a, b)
-    _, VariableType(_) if sub_b != b -> unify(context, a, sub_b)
-    VariableType(i), _ ->
+    TypeVariable(_), _ if sub_a != a -> unify(context, sub_a, b)
+    _, TypeVariable(_) if sub_b != b -> unify(context, a, sub_b)
+    TypeVariable(i), _ ->
       case occurs_in(i, b) {
         True -> Error(compiler.AnotherTypeError)
         False -> Ok(add_substitution(context, i, b))
       }
-    _, VariableType(j) ->
+    _, TypeVariable(j) ->
       case occurs_in(j, a) {
         True -> Error(compiler.AnotherTypeError)
         False -> Ok(add_substitution(context, j, a))
@@ -259,15 +310,16 @@ pub fn solve_constraints(context: Context) -> Result(Context, CompilerError) {
 
 pub fn substitute(t: Type, subs: Dict(String, Type)) -> Type {
   case t {
+    ModuleType(_) -> t
     FunctionType(params, return) ->
       FunctionType(
         list.map(params, substitute(_, subs)),
         substitute(return, subs),
       )
-    IdentifiedType(id, assigned) ->
-      IdentifiedType(id, list.map(assigned, substitute(_, subs)))
+    TypeConstructor(id, assigned) ->
+      TypeConstructor(id, list.map(assigned, substitute(_, subs)))
     TupleType(_) -> todo
-    VariableType(name) -> dict.get(subs, name) |> result.unwrap(t)
+    TypeVariable(name) -> dict.get(subs, name) |> result.unwrap(t)
   }
 }
 
@@ -292,6 +344,14 @@ pub fn substitute_expression(
     Int(_) -> expr
     String(_) -> expr
     Variable(t, name) -> Variable(substitute(t, subs), name)
+    Call(function, args) ->
+      Call(
+        substitute_expression(function, subs),
+        list.map(args, substitute_expression(_, subs)),
+      )
+    FieldAccess(_, _, _) -> todo
+    FunctionReference(t, loc, name) ->
+      FunctionReference(substitute(t, subs), loc, name)
   }
 }
 
@@ -331,11 +391,12 @@ fn union_type_variables(ts: List(Type)) -> set.Set(String) {
 
 fn find_type_variables(t: Type) -> set.Set(String) {
   case t {
+    ModuleType(_) -> set.new()
     FunctionType(param_types, return_type) ->
       union_type_variables([return_type, ..param_types])
-    IdentifiedType(_, assigned_types) -> union_type_variables(assigned_types)
+    TypeConstructor(_, assigned_types) -> union_type_variables(assigned_types)
     TupleType(item_types) -> union_type_variables(item_types)
-    VariableType(name) -> set.from_list([name])
+    TypeVariable(name) -> set.from_list([name])
   }
 }
 
@@ -378,20 +439,20 @@ pub fn resolve_type(
                 let #(_, param_type) = pair
                 resolve_type(data, prototypes, param_type)
               }))
-              |> result.map(IdentifiedType(ModuleType(location, name), _))
+              |> result.map(TypeConstructor(TypeFromModule(location, name), _))
             }
           }
         }
         Error(e) ->
           // TODO: can probably handle via lookup instead
           case name, module_option, params {
-            "Int", None, [] -> Ok(IdentifiedType(BuiltInType("Int"), []))
-            "Float", None, [] -> Ok(IdentifiedType(BuiltInType("Float"), []))
-            "String", None, [] -> Ok(IdentifiedType(BuiltInType("String"), []))
+            "Int", None, [] -> Ok(TypeConstructor(BuiltInType("Int"), []))
+            "Float", None, [] -> Ok(TypeConstructor(BuiltInType("Float"), []))
+            "String", None, [] -> Ok(TypeConstructor(BuiltInType("String"), []))
             "List", None, [item_type] ->
               resolve_type(data, prototypes, item_type)
               |> result.map(fn(resolved) {
-                IdentifiedType(BuiltInType("List"), [resolved])
+                TypeConstructor(BuiltInType("List"), [resolved])
               })
             _, _, _ -> Error(e)
           }
@@ -410,7 +471,7 @@ pub fn resolve_type(
         _, Error(e) -> Error(e)
       }
     }
-    glance.VariableType(name) -> Ok(VariableType(name))
+    glance.VariableType(name) -> Ok(TypeVariable(name))
     glance.HoleType(_) -> {
       todo
     }
@@ -555,9 +616,9 @@ pub fn resolve_types(
   let custom_types_generic =
     dict.map_values(dict.from_list(custom_types), fn(name, custom_type) {
       GenericType(
-        IdentifiedType(
-          ModuleType(location, name),
-          custom_type.parameters |> list.map(VariableType(_)),
+        TypeConstructor(
+          TypeFromModule(location, name),
+          custom_type.parameters |> list.map(TypeVariable(_)),
         ),
         custom_type.parameters,
       )
@@ -579,6 +640,8 @@ fn analyze_high_level(
     |> result.map(fn(module) { #(module, modules) }),
   )
   use parsed <- result.try(project.parse_module(project, location))
+  //io.debug(parsed)
+  //panic
   use #(imports, modules) <- result.try(
     list.try_fold(parsed.imports, #([], modules), fn(acc, import_) {
       let #(imports, modules) = acc
@@ -623,7 +686,7 @@ fn analyze_high_level(
   ))
   // TODO: resolve constants and functions
   // TODO: filter to only public parts
-  #(Module(location, imports, types, custom_types), modules)
+  #(Module(location, imports, types, custom_types, dict.new()), modules)
 }
 
 pub fn analyze_module(
