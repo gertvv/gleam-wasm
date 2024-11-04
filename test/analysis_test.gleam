@@ -3,18 +3,22 @@ import compiler
 import glance
 import gleam/dict
 import gleam/option.{None, Some}
+import gleam/pair
 import gleam/result
 import gleeunit/should
+import pprint
 import project
 
-pub fn resolve_basic_types_test() {
+fn empty_module_internals(package_name, module_path) {
   let project =
-    project.Project("test", dict.new(), fn(_a, _b) {
-      Error(compiler.ReferenceError("foo"))
+    project.Project(package_name, dict.new(), fn(_a, _b) {
+      Error(compiler.ReferenceError("test"))
     })
-  let location = project.SourceLocation("test", "bar")
-  let default_types = dict.new()
+  let location = project.SourceLocation(package_name, module_path)
+  analysis.ModuleInternals(project, location, dict.new(), dict.new())
+}
 
+pub fn resolve_basic_types_test() {
   let int_type = analysis.TypeConstructor(analysis.BuiltInType("Int"), [])
   let float_type = analysis.TypeConstructor(analysis.BuiltInType("Float"), [])
   let list_type = fn(item_type) {
@@ -22,45 +26,46 @@ pub fn resolve_basic_types_test() {
   }
 
   analysis.resolve_type(
-    analysis.ModuleInternals(project, location, dict.new(), default_types),
+    empty_module_internals("foo", "bar"),
     dict.new(),
     glance.NamedType("Int", None, []),
   )
   |> should.equal(Ok(int_type))
 
   analysis.resolve_type(
-    analysis.ModuleInternals(project, location, dict.new(), default_types),
+    empty_module_internals("foo", "bar"),
     dict.new(),
     glance.NamedType("Float", None, []),
   )
   |> should.equal(Ok(float_type))
 
   analysis.resolve_type(
-    analysis.ModuleInternals(project, location, dict.new(), default_types),
+    empty_module_internals("foo", "bar"),
     dict.new(),
     glance.NamedType("MyFloat", None, []),
   )
   |> should.equal(Error(compiler.ReferenceError("MyFloat")))
 
   analysis.resolve_type(
-    analysis.ModuleInternals(project, location, dict.new(), default_types),
+    empty_module_internals("foo", "bar"),
     dict.new(),
     glance.NamedType("List", None, [glance.NamedType("Int", None, [])]),
   )
   |> should.equal(Ok(list_type(int_type)))
 
   analysis.resolve_type(
-    analysis.ModuleInternals(project, location, dict.new(), default_types),
+    empty_module_internals("foo", "bar"),
     dict.new(),
     glance.NamedType("List", None, [glance.NamedType("MyFloat", None, [])]),
   )
   |> should.equal(Error(compiler.ReferenceError("MyFloat")))
 
-  let generic_custom_type_id = analysis.TypeFromModule(location, "CustomType")
+  let generic_custom_type_id =
+    analysis.TypeFromModule(project.SourceLocation("foo", "bar"), "CustomType")
   let generic_custom_type = analysis.Prototype(parameters: ["b", "c"])
 
   analysis.resolve_type(
-    analysis.ModuleInternals(project, location, dict.new(), default_types),
+    empty_module_internals("foo", "bar"),
     dict.from_list([#("CustomType", generic_custom_type)]),
     glance.NamedType("CustomType", None, [
       glance.NamedType("Float", None, []),
@@ -72,7 +77,7 @@ pub fn resolve_basic_types_test() {
   )
 
   analysis.resolve_type(
-    analysis.ModuleInternals(project, location, dict.new(), default_types),
+    empty_module_internals("foo", "bar"),
     dict.from_list([#("CustomType", generic_custom_type)]),
     glance.NamedType("CustomType", None, [
       glance.VariableType("x"),
@@ -89,7 +94,7 @@ pub fn resolve_basic_types_test() {
   )
 
   analysis.resolve_type(
-    analysis.ModuleInternals(project, location, dict.new(), default_types),
+    empty_module_internals("foo", "bar"),
     dict.from_list([#("CustomType", generic_custom_type)]),
     glance.NamedType("CustomType", None, [glance.VariableType("x")]),
   )
@@ -448,12 +453,13 @@ pub fn type_infer_function_test() {
       ],
     )
 
-  let #(context, initd_fn) =
+  let assert Ok(#(context, initd_fn)) =
     parsed_fn
     |> analysis.init_inference(
       analysis.TypeVariable("$1"),
       dict.new(),
       analysis.Context(
+        empty_module_internals("foo", "bar"),
         dict.from_list([#("$1", analysis.TypeVariable("$1"))]),
         [],
         2,
@@ -463,7 +469,7 @@ pub fn type_infer_function_test() {
   initd_fn |> should.equal(fn_with_blanks)
   context.constraints |> should.equal(constraints)
 
-  let assert Ok(analysis.Context(subst, _, _)) =
+  let assert Ok(analysis.Context(substitution: subst, ..)) =
     context
     |> analysis.solve_constraints
 
@@ -518,6 +524,7 @@ pub fn type_infer_function_using_import_test() {
         ),
       ],
     )
+
   let constraints = [
     analysis.Equal(
       analysis.TypeVariable("$1"),
@@ -566,12 +573,13 @@ pub fn type_infer_function_using_import_test() {
       ],
     )
 
-  let #(context, initd_fn) =
+  let assert Ok(#(context, initd_fn)) =
     parsed_fn
     |> analysis.init_inference(
       analysis.TypeVariable("$1"),
       dict.from_list([#("int", analysis.ModuleType(module_int))]),
       analysis.Context(
+        empty_module_internals("foo", "bar"),
         dict.from_list([#("$1", analysis.TypeVariable("$1"))]),
         [],
         2,
@@ -581,7 +589,7 @@ pub fn type_infer_function_using_import_test() {
   initd_fn |> should.equal(fn_with_blanks)
   context.constraints |> should.equal(constraints)
 
-  let assert Ok(analysis.Context(subst, _, _)) =
+  let assert Ok(analysis.Context(substitution: subst, ..)) =
     context
     |> analysis.solve_constraints
 
@@ -591,4 +599,54 @@ pub fn type_infer_function_using_import_test() {
   fn_with_blanks
   |> analysis.substitute_expression(substitution)
   |> should.equal(typed_fn)
+}
+
+pub fn type_infer_function_with_return_annotation_test() {
+  let int_type = analysis.TypeConstructor(analysis.BuiltInType("Int"), [])
+
+  // fn() -> Int { 42 }
+  glance.Fn([], Some(glance.NamedType("Int", None, [])), [
+    glance.Expression(glance.Int("42")),
+  ])
+  |> analysis.init_inference(
+    analysis.TypeVariable("$1"),
+    dict.from_list([]),
+    analysis.Context(
+      empty_module_internals("foo", "bar"),
+      dict.from_list([#("$1", analysis.TypeVariable("$1"))]),
+      [],
+      2,
+    ),
+  )
+  |> result.map(pair.second)
+  |> should.equal(
+    Ok(
+      analysis.Fn(analysis.FunctionType([], int_type), [], [analysis.Int("42")]),
+    ),
+  )
+
+  // fn() -> Bar { 42 }, where type Bar = Int
+  glance.Fn([], Some(glance.NamedType("Bar", None, [])), [
+    glance.Expression(glance.Int("42")),
+  ])
+  |> analysis.init_inference(
+    analysis.TypeVariable("$1"),
+    dict.from_list([]),
+    analysis.Context(
+      analysis.ModuleInternals(
+        ..empty_module_internals("foo", "bar"),
+        types: dict.from_list([#("Bar", analysis.GenericType(int_type, []))]),
+      ),
+      dict.from_list([#("$1", analysis.TypeVariable("$1"))]),
+      [],
+      2,
+    ),
+  )
+  |> result.map(pair.second)
+  |> should.equal(
+    Ok(
+      analysis.Fn(analysis.FunctionType([], int_type), [], [analysis.Int("42")]),
+    ),
+  )
+  // TODO: this fails because it doesn't look for Bar in the ModuleInternals.types -- add a test for that first
 }

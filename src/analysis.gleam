@@ -36,6 +36,8 @@ pub type Type {
   TypeVariable(name: String)
 }
 
+const int_type = TypeConstructor(BuiltInType("Int"), [])
+
 pub type Variant {
   Variant(name: String, fields: List(Field(Type)))
 }
@@ -94,6 +96,7 @@ pub type Constraint {
 
 pub type Context {
   Context(
+    internals: ModuleInternals,
     substitution: Dict(String, Type),
     constraints: List(Constraint),
     next_variable: Int,
@@ -105,22 +108,23 @@ fn fresh_type_variable(context: Context) -> #(Context, Type) {
   let type_variable = TypeVariable(name)
   #(
     Context(
-      dict.insert(context.substitution, name, type_variable),
-      constraints: context.constraints,
+      ..context,
+      substitution: dict.insert(context.substitution, name, type_variable),
       next_variable: context.next_variable + 1,
     ),
     type_variable,
   )
 }
 
-// TODO: integrate with resolve_type
-fn maybe_fresh_type_variable(
+fn resolve_optional_type(
   context: Context,
   typ: Option(glance.Type),
-) -> #(Context, Type) {
+) -> Result(#(Context, Type), CompilerError) {
   case typ {
-    Some(t) -> todo
-    None -> fresh_type_variable(context)
+    Some(t) ->
+      resolve_type(context.internals, dict.new(), t)
+      |> result.map(fn(t) { #(context, t) })
+    None -> Ok(fresh_type_variable(context))
   }
 }
 
@@ -147,21 +151,36 @@ pub fn init_inference(
   expected_type: Type,
   environment: Dict(String, Type),
   context: Context,
-) -> #(Context, Expression) {
+) -> Result(#(Context, Expression), CompilerError) {
   case expr {
+    glance.Int(value) -> {
+      Ok(#(add_constraint(context, Equal(expected_type, int_type)), Int(value)))
+    }
     glance.Variable(name) -> {
-      let assert Ok(variable_type) = dict.get(environment, name)
+      use variable_type <- result.map(
+        dict.get(environment, name)
+        |> result.map_error(fn(_) { compiler.ReferenceError(name) }),
+      )
       #(
         add_constraint(context, Equal(expected_type, variable_type)),
         Variable(variable_type, name),
       )
     }
     glance.Fn(args, return, [glance.Expression(body)]) -> {
-      let #(context, return_type) = maybe_fresh_type_variable(context, return)
-      let #(context, param_types) =
+      use #(context, return_type) <- result.try(resolve_optional_type(
+        context,
+        return,
+      ))
+      use #(context, param_types) <- result.try(
         args
-        |> list.map(fn(p) { p.type_ })
-        |> list.map_fold(from: context, with: maybe_fresh_type_variable)
+        |> list.try_fold(from: #(context, []), with: fn(pair, param) {
+          let #(context, acc) = pair
+          resolve_optional_type(context, param.type_)
+          |> result.map(fn(r) { #(r.0, [r.1, ..acc]) })
+        }),
+      )
+      let param_types = list.reverse(param_types)
+
       // TODO: should Discarded names even be added to the environment?
       let environment =
         list.map2(args, param_types, fn(arg, typ) {
@@ -169,8 +188,12 @@ pub fn init_inference(
         })
         |> dict.from_list
         |> dict.merge(environment, _)
-      let #(context, body) =
-        init_inference(body, return_type, environment, context)
+      use #(context, body) <- result.map(init_inference(
+        body,
+        return_type,
+        environment,
+        context,
+      ))
       let fn_type = FunctionType(param_types, return_type)
       #(
         add_constraint(context, Equal(expected_type, fn_type)),
@@ -184,15 +207,22 @@ pub fn init_inference(
           fresh_type_variable(context)
         })
       let fn_type = FunctionType(arg_types, expected_type)
-      let #(context, function) =
-        init_inference(function, fn_type, environment, context)
-      let #(context, args) =
+      use #(context, function) <- result.try(init_inference(
+        function,
+        fn_type,
+        environment,
+        context,
+      ))
+      use #(context, args) <- result.map(
         list.zip(args, arg_types)
-        |> list.map_fold(from: context, with: fn(context, pair) {
-          let #(arg, arg_type) = pair
+        |> list.try_fold(from: #(context, []), with: fn(acc_pair, arg_pair) {
+          let #(context, acc) = acc_pair
+          let #(arg, arg_type) = arg_pair
           init_inference(arg.item, arg_type, environment, context)
-        })
-      #(context, Call(function, args))
+          |> result.map(fn(r) { #(r.0, [r.1, ..acc]) })
+        }),
+      )
+      #(context, Call(function, list.reverse(args)))
     }
     glance.FieldAccess(container, label) -> {
       // short-cut module field access if possible
@@ -218,19 +248,27 @@ pub fn init_inference(
           )
         })
       })
-      |> result.lazy_unwrap(fn() {
-        let #(context, container_type) = fresh_type_variable(context)
-        let #(context, container) =
-          init_inference(container, container_type, environment, context)
-        todo
-      })
+      |> result.try_recover(fn(_) { Error(compiler.AnotherTypeError) })
+      //|> result.try_recover(fn() {
+      // let #(context, container_type) = fresh_type_variable(context)
+      // let #(context, container) =
+      //   init_inference(container, container_type, environment, context)
+      // todo
+      //})
     }
     glance.BinaryOperator(glance.MultInt, left, right) -> {
-      let int_type = TypeConstructor(BuiltInType("Int"), [])
-      let #(context, left) =
-        init_inference(left, int_type, environment, context)
-      let #(context, right) =
-        init_inference(right, int_type, environment, context)
+      use #(context, left) <- result.try(init_inference(
+        left,
+        int_type,
+        environment,
+        context,
+      ))
+      use #(context, right) <- result.map(init_inference(
+        right,
+        int_type,
+        environment,
+        context,
+      ))
       #(
         Context(
           ..context,
