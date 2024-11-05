@@ -122,7 +122,7 @@ fn resolve_optional_type(
 ) -> Result(#(Context, Type), CompilerError) {
   case typ {
     Some(t) ->
-      resolve_type(context.internals, dict.new(), t)
+      resolve_type(context.internals, t)
       |> result.map(fn(t) { #(context, t) })
     None -> Ok(fresh_type_variable(context))
   }
@@ -438,16 +438,19 @@ fn find_type_variables(t: Type) -> set.Set(String) {
   }
 }
 
+fn prototype(parameters: List(String)) -> GenericType {
+  GenericType(TypeVariable(""), parameters)
+}
+
 pub fn resolve_type(
   data: ModuleInternals,
-  prototypes: Dict(String, Prototype),
   declared_type: glance.Type,
 ) -> Result(Type, CompilerError) {
   case declared_type {
     glance.NamedType(name, module_option, params) -> {
       let candidate = case module_option {
         None ->
-          dict.get(prototypes, name)
+          dict.get(data.types, name)
           |> result.map(fn(t) { #(data.location, t) })
           |> result.map_error(fn(_) { compiler.ReferenceError(name) })
         Some(module_alias) ->
@@ -457,14 +460,14 @@ pub fn resolve_type(
             dict.get(module.types, name)
             |> result.map_error(fn(_) { compiler.ReferenceError(name) })
             |> result.map(fn(def) {
-              #(module.location, Prototype(def.parameters))
+              #(module.location, prototype(def.parameters))
             })
           })
       }
       case candidate {
         Ok(#(location, candidate_type)) -> {
           case candidate_type, params {
-            Prototype(parameters: exp_params), act_params -> {
+            GenericType(parameters: exp_params, ..), act_params -> {
               list.strict_zip(exp_params, act_params)
               |> result.map_error(fn(_) {
                 compiler.TypeArityError(
@@ -475,7 +478,7 @@ pub fn resolve_type(
               })
               |> result.try(list.try_map(_, fn(pair) {
                 let #(_, param_type) = pair
-                resolve_type(data, prototypes, param_type)
+                resolve_type(data, param_type)
               }))
               |> result.map(TypeConstructor(TypeFromModule(location, name), _))
             }
@@ -488,7 +491,7 @@ pub fn resolve_type(
             "Float", None, [] -> Ok(TypeConstructor(BuiltInType("Float"), []))
             "String", None, [] -> Ok(TypeConstructor(BuiltInType("String"), []))
             "List", None, [item_type] ->
-              resolve_type(data, prototypes, item_type)
+              resolve_type(data, item_type)
               |> result.map(fn(resolved) {
                 TypeConstructor(BuiltInType("List"), [resolved])
               })
@@ -501,8 +504,8 @@ pub fn resolve_type(
     }
     glance.FunctionType(function_parameters, return) -> {
       let resolved_parameters =
-        list.try_map(function_parameters, resolve_type(data, prototypes, _))
-      let resolved_return = resolve_type(data, prototypes, return)
+        list.try_map(function_parameters, resolve_type(data, _))
+      let resolved_return = resolve_type(data, return)
       case resolved_parameters, resolved_return {
         Ok(p), Ok(r) -> Ok(FunctionType(p, r))
         Error(e), _ -> Error(e)
@@ -518,11 +521,10 @@ pub fn resolve_type(
 
 fn resolve_variant_field(
   data: ModuleInternals,
-  prototypes: Dict(String, Prototype),
   parameters: set.Set(String),
   field: glance.Field(glance.Type),
 ) -> Result(Field(Type), CompilerError) {
-  resolve_type(data, prototypes, field.item)
+  resolve_type(data, field.item)
   |> result.try(fn(t) {
     let undeclared =
       find_type_variables(t) |> set.difference(parameters) |> set.to_list
@@ -536,28 +538,20 @@ fn resolve_variant_field(
 
 fn resolve_variant(
   data: ModuleInternals,
-  prototypes: Dict(String, Prototype),
   parameters: set.Set(String),
   variant: glance.Variant,
 ) -> Result(Variant, CompilerError) {
-  list.map(variant.fields, resolve_variant_field(
-    data,
-    prototypes,
-    parameters,
-    _,
-  ))
+  list.map(variant.fields, resolve_variant_field(data, parameters, _))
   |> result.all
   |> result.map(Variant(variant.name, _))
 }
 
 pub fn resolve_custom_type(
   data: ModuleInternals,
-  prototypes: Dict(String, Prototype),
   parsed: glance.Definition(glance.CustomType),
 ) -> Result(#(String, CustomType), CompilerError) {
   list.map(parsed.definition.variants, resolve_variant(
     data,
-    prototypes,
     set.from_list(parsed.definition.parameters),
     _,
   ))
@@ -572,10 +566,9 @@ pub fn resolve_custom_type(
 
 fn resolve_type_alias(
   data: ModuleInternals,
-  prototypes: Dict(String, Prototype),
   parsed: glance.Definition(glance.TypeAlias),
 ) -> Result(#(String, GenericType), CompilerError) {
-  resolve_type(data, prototypes, parsed.definition.aliased)
+  resolve_type(data, parsed.definition.aliased)
   |> result.map(fn(resolved) {
     #(
       parsed.definition.name,
@@ -590,22 +583,22 @@ pub type Prototype {
 
 fn prototype_type_alias(
   def: glance.Definition(glance.TypeAlias),
-) -> #(String, Prototype) {
+) -> #(String, GenericType) {
   case def {
     glance.Definition(_, glance.TypeAlias(name: name, parameters: params, ..)) -> #(
       name,
-      Prototype(params),
+      prototype(params),
     )
   }
 }
 
 fn prototype_custom_type(
   def: glance.Definition(glance.CustomType),
-) -> #(String, Prototype) {
+) -> #(String, GenericType) {
   case def {
     glance.Definition(_, glance.CustomType(name: name, parameters: params, ..)) -> #(
       name,
-      Prototype(params),
+      prototype(params),
     )
   }
 }
@@ -634,21 +627,13 @@ pub fn resolve_types(
       module
     })
   let internals =
-    ModuleInternals(project, location, imported_modules, dict.new())
+    ModuleInternals(project, location, imported_modules, prototypes)
 
   use aliases <- result.try(
-    result.all(
-      list.map(parsed.type_aliases, resolve_type_alias(internals, prototypes, _)),
-    ),
+    result.all(list.map(parsed.type_aliases, resolve_type_alias(internals, _))),
   )
   use custom_types <- result.map(
-    result.all(
-      list.map(parsed.custom_types, resolve_custom_type(
-        internals,
-        prototypes,
-        _,
-      )),
-    ),
+    result.all(list.map(parsed.custom_types, resolve_custom_type(internals, _))),
   )
 
   let custom_types_generic =

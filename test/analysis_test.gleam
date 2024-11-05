@@ -27,46 +27,44 @@ pub fn resolve_basic_types_test() {
 
   analysis.resolve_type(
     empty_module_internals("foo", "bar"),
-    dict.new(),
     glance.NamedType("Int", None, []),
   )
   |> should.equal(Ok(int_type))
 
   analysis.resolve_type(
     empty_module_internals("foo", "bar"),
-    dict.new(),
     glance.NamedType("Float", None, []),
   )
   |> should.equal(Ok(float_type))
 
   analysis.resolve_type(
     empty_module_internals("foo", "bar"),
-    dict.new(),
     glance.NamedType("MyFloat", None, []),
   )
   |> should.equal(Error(compiler.ReferenceError("MyFloat")))
 
   analysis.resolve_type(
     empty_module_internals("foo", "bar"),
-    dict.new(),
     glance.NamedType("List", None, [glance.NamedType("Int", None, [])]),
   )
   |> should.equal(Ok(list_type(int_type)))
 
   analysis.resolve_type(
     empty_module_internals("foo", "bar"),
-    dict.new(),
     glance.NamedType("List", None, [glance.NamedType("MyFloat", None, [])]),
   )
   |> should.equal(Error(compiler.ReferenceError("MyFloat")))
 
   let generic_custom_type_id =
     analysis.TypeFromModule(project.SourceLocation("foo", "bar"), "CustomType")
-  let generic_custom_type = analysis.Prototype(parameters: ["b", "c"])
+  let generic_custom_type =
+    analysis.GenericType(analysis.TypeVariable(""), parameters: ["b", "c"])
 
   analysis.resolve_type(
-    empty_module_internals("foo", "bar"),
-    dict.from_list([#("CustomType", generic_custom_type)]),
+    analysis.ModuleInternals(
+      ..empty_module_internals("foo", "bar"),
+      types: dict.from_list([#("CustomType", generic_custom_type)]),
+    ),
     glance.NamedType("CustomType", None, [
       glance.NamedType("Float", None, []),
       glance.NamedType("Int", None, []),
@@ -77,8 +75,10 @@ pub fn resolve_basic_types_test() {
   )
 
   analysis.resolve_type(
-    empty_module_internals("foo", "bar"),
-    dict.from_list([#("CustomType", generic_custom_type)]),
+    analysis.ModuleInternals(
+      ..empty_module_internals("foo", "bar"),
+      types: dict.from_list([#("CustomType", generic_custom_type)]),
+    ),
     glance.NamedType("CustomType", None, [
       glance.VariableType("x"),
       glance.NamedType("Int", None, []),
@@ -94,8 +94,10 @@ pub fn resolve_basic_types_test() {
   )
 
   analysis.resolve_type(
-    empty_module_internals("foo", "bar"),
-    dict.from_list([#("CustomType", generic_custom_type)]),
+    analysis.ModuleInternals(
+      ..empty_module_internals("foo", "bar"),
+      types: dict.from_list([#("CustomType", generic_custom_type)]),
+    ),
     glance.NamedType("CustomType", None, [glance.VariableType("x")]),
   )
   |> should.equal(
@@ -648,5 +650,5 @@ pub fn type_infer_function_with_return_annotation_test() {
       analysis.Fn(analysis.FunctionType([], int_type), [], [analysis.Int("42")]),
     ),
   )
-  // TODO: this fails because it doesn't look for Bar in the ModuleInternals.types -- add a test for that first
+  // TODO: this fails because it doesn't resolve the Bar alias to Int -- add a test for that first
 }
