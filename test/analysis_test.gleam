@@ -608,9 +608,12 @@ pub fn type_infer_function_using_import_test() {
     parsed_fn
     |> analysis.init_inference(
       analysis.TypeVariable("$1"),
-      dict.from_list([#("int", analysis.ModuleType(module_int))]),
+      dict.new(),
       analysis.Context(
-        empty_module_internals("foo", "bar"),
+        analysis.ModuleInternals(
+          ..empty_module_internals("foo", "bar"),
+          imports: dict.from_list([#("int", module_int)]),
+        ),
         dict.from_list([#("$1", analysis.TypeVariable("$1"))]),
         [],
         2,
@@ -679,5 +682,4 @@ pub fn type_infer_function_with_return_annotation_test() {
       analysis.Fn(analysis.FunctionType([], int_type), [], [analysis.Int("42")]),
     ),
   )
-  // TODO: this fails because it doesn't resolve the Bar alias to Int -- add a test for that first
 }

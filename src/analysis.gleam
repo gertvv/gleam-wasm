@@ -28,7 +28,6 @@ pub type GenericType {
 }
 
 pub type Type {
-  ModuleType(module: Module)
   TypeConstructor(generic_type: TypeId, assigned_types: List(Type))
   // TODO: make TypeConstructor? (Add a TypeId constructor TupleType(arity))
   TupleType(elements: List(Type))
@@ -144,9 +143,6 @@ fn add_substitution(context: Context, name: String, typ: Type) -> Context {
   Context(..context, substitution: dict.insert(context.substitution, name, typ))
 }
 
-// TODO: why not pass the environment via the context?
-// TODO: integrate with resolve_type
-// TODO: add modules and unqualified imports to the environment
 pub fn init_inference(
   expr: glance.Expression,
   expected_type: Type,
@@ -233,13 +229,7 @@ pub fn init_inference(
         }
         _ -> Error(Nil)
       }
-      |> result.try(dict.get(environment, _))
-      |> result.try(fn(val) {
-        case val {
-          ModuleType(module) -> Ok(module)
-          _ -> Error(Nil)
-        }
-      })
+      |> result.try(dict.get(context.internals.imports, _))
       |> result.try(fn(module) {
         dict.get(module.functions, label)
         |> result.map(fn(function_type) {
@@ -298,7 +288,6 @@ fn occurs_in(var: String, t: Type) -> Bool {
     FunctionType(args, ret) -> list.any([ret, ..args], occurs_in(var, _))
     TypeConstructor(_, sub) -> list.any(sub, occurs_in(var, _))
     TupleType(args) -> list.any(args, occurs_in(var, _))
-    ModuleType(_) -> False
   }
 }
 
@@ -349,7 +338,6 @@ pub fn solve_constraints(context: Context) -> Result(Context, CompilerError) {
 
 pub fn substitute(t: Type, subs: Dict(String, Type)) -> Type {
   case t {
-    ModuleType(_) -> t
     FunctionType(params, return) ->
       FunctionType(
         list.map(params, substitute(_, subs)),
@@ -430,7 +418,6 @@ fn union_type_variables(ts: List(Type)) -> set.Set(String) {
 
 fn find_type_variables(t: Type) -> set.Set(String) {
   case t {
-    ModuleType(_) -> set.new()
     FunctionType(param_types, return_type) ->
       union_type_variables([return_type, ..param_types])
     TypeConstructor(_, assigned_types) -> union_type_variables(assigned_types)
@@ -484,7 +471,6 @@ pub fn resolve_type(
               }))
               |> result.map(fn(params) {
                 case nested_type {
-                  ModuleType(_) -> nested_type
                   TypeConstructor(_, _) | FunctionType(_, _) | TupleType(_) ->
                     substitute(nested_type, dict.from_list(params))
                   TypeVariable(_) ->
