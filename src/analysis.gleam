@@ -5,6 +5,7 @@ import gleam/int
 import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/pair
 import gleam/result
 import gleam/set
 import gleam/string
@@ -467,7 +468,7 @@ pub fn resolve_type(
       case candidate {
         Ok(#(location, candidate_type)) -> {
           case candidate_type, params {
-            GenericType(parameters: exp_params, ..), act_params -> {
+            GenericType(typ: nested_type, parameters: exp_params), act_params -> {
               list.strict_zip(exp_params, act_params)
               |> result.map_error(fn(_) {
                 compiler.TypeArityError(
@@ -476,11 +477,25 @@ pub fn resolve_type(
                   list.length(act_params),
                 )
               })
-              |> result.try(list.try_map(_, fn(pair) {
-                let #(_, param_type) = pair
+              |> result.try(list.try_map(_, fn(param_def) {
+                let #(param_name, param_type) = param_def
                 resolve_type(data, param_type)
+                |> result.map(pair.new(param_name, _))
               }))
-              |> result.map(TypeConstructor(TypeFromModule(location, name), _))
+              |> result.map(fn(params) {
+                case nested_type {
+                  ModuleType(_) -> nested_type
+                  TypeConstructor(_, _) | FunctionType(_, _) | TupleType(_) ->
+                    substitute(nested_type, dict.from_list(params))
+                  TypeVariable(_) ->
+                    // If the top-level type we find is a TypeVariable then it is a prototype (placeholder)
+                    // So we replace it by a reference to that (not-yet-constructed) type
+                    TypeConstructor(
+                      TypeFromModule(location, name),
+                      params |> list.map(pair.second),
+                    )
+                }
+              })
             }
           }
         }
@@ -632,6 +647,11 @@ pub fn resolve_types(
   use aliases <- result.try(
     result.all(list.map(parsed.type_aliases, resolve_type_alias(internals, _))),
   )
+  let internals =
+    ModuleInternals(
+      ..internals,
+      types: dict.merge(prototypes, dict.from_list(aliases)),
+    )
   use custom_types <- result.map(
     result.all(list.map(parsed.custom_types, resolve_custom_type(internals, _))),
   )

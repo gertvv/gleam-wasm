@@ -282,6 +282,7 @@ pub fn resolve_type_aliases_test() {
   let location = project.SourceLocation("test", "bar")
 
   let int_type = analysis.TypeConstructor(analysis.BuiltInType("Int"), [])
+  let float_type = analysis.TypeConstructor(analysis.BuiltInType("Float"), [])
 
   let list_type = fn(item_type) {
     analysis.TypeConstructor(analysis.BuiltInType("List"), [item_type])
@@ -374,6 +375,35 @@ pub fn resolve_type_aliases_test() {
       ]),
     ),
   )
+
+  analysis.resolve_type(
+    analysis.ModuleInternals(
+      ..empty_module_internals("foo", "bar"),
+      types: dict.from_list([#("Alias", analysis.GenericType(int_type, []))]),
+    ),
+    glance.NamedType("Alias", None, []),
+  )
+  |> should.equal(Ok(int_type))
+
+  analysis.resolve_type(
+    analysis.ModuleInternals(
+      ..empty_module_internals("foo", "bar"),
+      types: dict.from_list([
+        #(
+          "Alias",
+          analysis.GenericType(
+            analysis.FunctionType(
+              [analysis.TypeVariable("a")],
+              analysis.TypeVariable("b"),
+            ),
+            ["a", "b"],
+          ),
+        ),
+      ]),
+    ),
+    glance.NamedType("Alias", None, [compiler.int_type, compiler.float_type]),
+  )
+  |> should.equal(Ok(analysis.FunctionType([int_type], float_type)))
 }
 
 pub fn type_infer_function_test() {
@@ -413,7 +443,6 @@ pub fn type_infer_function_test() {
       ],
     )
 
-  // TODO: from here adapt
   let constraints = [
     analysis.Equal(
       analysis.TypeVariable("$1"),
