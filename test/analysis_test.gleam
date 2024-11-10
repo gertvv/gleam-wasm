@@ -19,23 +19,17 @@ fn empty_module_internals(package_name, module_path) {
 }
 
 pub fn resolve_basic_types_test() {
-  let int_type = analysis.TypeConstructor(analysis.BuiltInType("Int"), [])
-  let float_type = analysis.TypeConstructor(analysis.BuiltInType("Float"), [])
-  let list_type = fn(item_type) {
-    analysis.TypeConstructor(analysis.BuiltInType("List"), [item_type])
-  }
-
   analysis.resolve_type(
     empty_module_internals("foo", "bar"),
     glance.NamedType("Int", None, []),
   )
-  |> should.equal(Ok(int_type))
+  |> should.equal(Ok(analysis.int_type))
 
   analysis.resolve_type(
     empty_module_internals("foo", "bar"),
     glance.NamedType("Float", None, []),
   )
-  |> should.equal(Ok(float_type))
+  |> should.equal(Ok(analysis.float_type))
 
   analysis.resolve_type(
     empty_module_internals("foo", "bar"),
@@ -47,7 +41,7 @@ pub fn resolve_basic_types_test() {
     empty_module_internals("foo", "bar"),
     glance.NamedType("List", None, [glance.NamedType("Int", None, [])]),
   )
-  |> should.equal(Ok(list_type(int_type)))
+  |> should.equal(Ok(analysis.list_type(analysis.int_type)))
 
   analysis.resolve_type(
     empty_module_internals("foo", "bar"),
@@ -71,7 +65,12 @@ pub fn resolve_basic_types_test() {
     ]),
   )
   |> should.equal(
-    Ok(analysis.TypeConstructor(generic_custom_type_id, [float_type, int_type])),
+    Ok(
+      analysis.TypeConstructor(generic_custom_type_id, [
+        analysis.float_type,
+        analysis.int_type,
+      ]),
+    ),
   )
 
   analysis.resolve_type(
@@ -88,7 +87,7 @@ pub fn resolve_basic_types_test() {
     Ok(
       analysis.TypeConstructor(generic_custom_type_id, [
         analysis.TypeVariable("x"),
-        int_type,
+        analysis.int_type,
       ]),
     ),
   )
@@ -116,8 +115,6 @@ pub fn resolve_dependent_custom_types_test() {
     })
   let location = project.SourceLocation("test", "bar")
 
-  let int_type = analysis.TypeConstructor(analysis.BuiltInType("Int"), [])
-
   analysis.resolve_types(
     project,
     location,
@@ -138,7 +135,7 @@ pub fn resolve_dependent_custom_types_test() {
       #(
         "TypeA",
         analysis.CustomType([], False, [
-          analysis.Variant("TypeA", [analysis.Field(None, int_type)]),
+          analysis.Variant("TypeA", [analysis.Field(None, analysis.int_type)]),
         ]),
       ),
       #(
@@ -281,13 +278,6 @@ pub fn resolve_type_aliases_test() {
     })
   let location = project.SourceLocation("test", "bar")
 
-  let int_type = analysis.TypeConstructor(analysis.BuiltInType("Int"), [])
-  let float_type = analysis.TypeConstructor(analysis.BuiltInType("Float"), [])
-
-  let list_type = fn(item_type) {
-    analysis.TypeConstructor(analysis.BuiltInType("List"), [item_type])
-  }
-
   analysis.resolve_types(
     project,
     location,
@@ -308,7 +298,9 @@ pub fn resolve_type_aliases_test() {
   )
   |> result.map(fn(r) { r.0 })
   |> should.equal(
-    Ok(dict.from_list([#("Alias", analysis.GenericType(int_type, []))])),
+    Ok(
+      dict.from_list([#("Alias", analysis.GenericType(analysis.int_type, []))]),
+    ),
   )
 
   analysis.resolve_types(
@@ -337,7 +329,12 @@ pub fn resolve_type_aliases_test() {
   |> result.map(fn(r) { r.0 })
   |> should.equal(
     Ok(
-      dict.from_list([#("Alias", analysis.GenericType(list_type(int_type), []))]),
+      dict.from_list([
+        #(
+          "Alias",
+          analysis.GenericType(analysis.list_type(analysis.int_type), []),
+        ),
+      ]),
     ),
   )
 
@@ -370,7 +367,9 @@ pub fn resolve_type_aliases_test() {
       dict.from_list([
         #(
           "Alias",
-          analysis.GenericType(list_type(analysis.TypeVariable("a")), ["a"]),
+          analysis.GenericType(analysis.list_type(analysis.TypeVariable("a")), [
+            "a",
+          ]),
         ),
       ]),
     ),
@@ -379,11 +378,13 @@ pub fn resolve_type_aliases_test() {
   analysis.resolve_type(
     analysis.ModuleInternals(
       ..empty_module_internals("foo", "bar"),
-      types: dict.from_list([#("Alias", analysis.GenericType(int_type, []))]),
+      types: dict.from_list([
+        #("Alias", analysis.GenericType(analysis.int_type, [])),
+      ]),
     ),
     glance.NamedType("Alias", None, []),
   )
-  |> should.equal(Ok(int_type))
+  |> should.equal(Ok(analysis.int_type))
 
   analysis.resolve_type(
     analysis.ModuleInternals(
@@ -403,11 +404,12 @@ pub fn resolve_type_aliases_test() {
     ),
     glance.NamedType("Alias", None, [compiler.int_type, compiler.float_type]),
   )
-  |> should.equal(Ok(analysis.FunctionType([int_type], float_type)))
+  |> should.equal(
+    Ok(analysis.FunctionType([analysis.int_type], analysis.float_type)),
+  )
 }
 
 pub fn type_infer_function_test() {
-  let int_type = analysis.TypeConstructor(analysis.BuiltInType("Int"), [])
   // fn(x, y) { x * y }
 
   let parsed_fn =
@@ -451,9 +453,9 @@ pub fn type_infer_function_test() {
         analysis.TypeVariable("$2"),
       ),
     ),
-    analysis.Equal(analysis.TypeVariable("$2"), int_type),
-    analysis.Equal(int_type, analysis.TypeVariable("$4")),
-    analysis.Equal(int_type, analysis.TypeVariable("$3")),
+    analysis.Equal(analysis.TypeVariable("$2"), analysis.int_type),
+    analysis.Equal(analysis.int_type, analysis.TypeVariable("$4")),
+    analysis.Equal(analysis.int_type, analysis.TypeVariable("$3")),
   ]
 
   let substitution =
@@ -465,21 +467,24 @@ pub fn type_infer_function_test() {
           analysis.TypeVariable("$2"),
         ),
       ),
-      #("$2", int_type),
-      #("$3", int_type),
-      #("$4", int_type),
+      #("$2", analysis.int_type),
+      #("$3", analysis.int_type),
+      #("$4", analysis.int_type),
     ])
 
   let typed_fn =
     analysis.Fn(
-      typ: analysis.FunctionType([int_type, int_type], int_type),
+      typ: analysis.FunctionType(
+        [analysis.int_type, analysis.int_type],
+        analysis.int_type,
+      ),
       argument_names: [glance.Named("x"), glance.Named("y")],
       body: [
         analysis.Expression(analysis.BinaryOperator(
-          int_type,
+          analysis.int_type,
           glance.MultInt,
-          analysis.Variable(int_type, "x"),
-          analysis.Variable(int_type, "y"),
+          analysis.Variable(analysis.int_type, "x"),
+          analysis.Variable(analysis.int_type, "y"),
         )),
       ],
     )
@@ -513,8 +518,6 @@ pub fn type_infer_function_test() {
 }
 
 pub fn type_infer_function_using_import_test() {
-  let int_type = analysis.TypeConstructor(analysis.BuiltInType("Int"), [])
-  let string_type = analysis.TypeConstructor(analysis.BuiltInType("String"), [])
   // fn(x) { int.to_string(x) }
 
   let parsed_fn =
@@ -533,7 +536,10 @@ pub fn type_infer_function_using_import_test() {
       dict.new(),
       dict.new(),
       dict.from_list([
-        #("to_string", analysis.FunctionType([int_type], string_type)),
+        #(
+          "to_string",
+          analysis.FunctionType([analysis.int_type], analysis.string_type),
+        ),
       ]),
     )
 
@@ -548,7 +554,7 @@ pub fn type_infer_function_using_import_test() {
         analysis.Expression(
           analysis.Call(
             analysis.FunctionReference(
-              analysis.FunctionType([int_type], string_type),
+              analysis.FunctionType([analysis.int_type], analysis.string_type),
               module_int.location,
               "to_string",
             ),
@@ -572,7 +578,7 @@ pub fn type_infer_function_using_import_test() {
         [analysis.TypeVariable("$4")],
         analysis.TypeVariable("$2"),
       ),
-      analysis.FunctionType([int_type], string_type),
+      analysis.FunctionType([analysis.int_type], analysis.string_type),
     ),
   ]
 
@@ -585,24 +591,24 @@ pub fn type_infer_function_using_import_test() {
           analysis.TypeVariable("$2"),
         ),
       ),
-      #("$2", string_type),
-      #("$3", int_type),
+      #("$2", analysis.string_type),
+      #("$3", analysis.int_type),
       #("$4", analysis.TypeVariable("$3")),
     ])
 
   let typed_fn =
     analysis.Fn(
-      typ: analysis.FunctionType([int_type], string_type),
+      typ: analysis.FunctionType([analysis.int_type], analysis.string_type),
       argument_names: [glance.Named("x")],
       body: [
         analysis.Expression(
           analysis.Call(
             analysis.FunctionReference(
-              analysis.FunctionType([int_type], string_type),
+              analysis.FunctionType([analysis.int_type], analysis.string_type),
               module_int.location,
               "to_string",
             ),
-            [analysis.Variable(int_type, "x")],
+            [analysis.Variable(analysis.int_type, "x")],
           ),
         ),
       ],
@@ -640,8 +646,6 @@ pub fn type_infer_function_using_import_test() {
 }
 
 pub fn type_infer_function_with_return_annotation_test() {
-  let int_type = analysis.TypeConstructor(analysis.BuiltInType("Int"), [])
-
   // fn() -> Int { 42 }
   glance.Fn([], Some(glance.NamedType("Int", None, [])), [
     glance.Expression(glance.Int("42")),
@@ -659,7 +663,7 @@ pub fn type_infer_function_with_return_annotation_test() {
   |> result.map(pair.second)
   |> should.equal(
     Ok(
-      analysis.Fn(analysis.FunctionType([], int_type), [], [
+      analysis.Fn(analysis.FunctionType([], analysis.int_type), [], [
         analysis.Expression(analysis.Int("42")),
       ]),
     ),
@@ -675,7 +679,9 @@ pub fn type_infer_function_with_return_annotation_test() {
     analysis.Context(
       analysis.ModuleInternals(
         ..empty_module_internals("foo", "bar"),
-        types: dict.from_list([#("Bar", analysis.GenericType(int_type, []))]),
+        types: dict.from_list([
+          #("Bar", analysis.GenericType(analysis.int_type, [])),
+        ]),
       ),
       dict.from_list([#("$1", analysis.TypeVariable("$1"))]),
       [],
@@ -685,7 +691,7 @@ pub fn type_infer_function_with_return_annotation_test() {
   |> result.map(pair.second)
   |> should.equal(
     Ok(
-      analysis.Fn(analysis.FunctionType([], int_type), [], [
+      analysis.Fn(analysis.FunctionType([], analysis.int_type), [], [
         analysis.Expression(analysis.Int("42")),
       ]),
     ),

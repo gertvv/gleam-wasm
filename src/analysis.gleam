@@ -13,6 +13,14 @@ import pprint
 import project.{type ModuleId, type Project}
 
 // TODO: next steps?
+// - reduce number of expression-types by adding a FunctionId and BuiltInFunction
+//    - Tuple constructors
+//    - Tuple indexing
+//    - List constructors
+//    - List patterns
+//    - Field access
+//    - Unary and binary operators
+//    - Bool constructors?
 // - complete inference for all expression types
 // - constructors for lists: Empty, NonEmpty & results: Ok, Error
 // - pattern matching
@@ -20,8 +28,17 @@ import project.{type ModuleId, type Project}
 // - inference for mutually recursive functions? call graph analysis?
 // - constants
 
+pub type BuiltInType {
+  NilType
+  IntType
+  FloatType
+  BoolType
+  StringType
+  ListType
+}
+
 pub type TypeId {
-  BuiltInType(name: String)
+  BuiltInType(BuiltInType)
   TypeFromModule(module: ModuleId, name: String)
 }
 
@@ -44,15 +61,19 @@ pub type Type {
   TypeVariable(name: String)
 }
 
-pub const nil_type = TypeConstructor(BuiltInType("Nil"), [])
+pub const nil_type = TypeConstructor(BuiltInType(NilType), [])
 
-pub const int_type = TypeConstructor(BuiltInType("Int"), [])
+pub const int_type = TypeConstructor(BuiltInType(IntType), [])
 
-pub const float_type = TypeConstructor(BuiltInType("Float"), [])
+pub const float_type = TypeConstructor(BuiltInType(FloatType), [])
 
-pub const bool_type = TypeConstructor(BuiltInType("Bool"), [])
+pub const bool_type = TypeConstructor(BuiltInType(BoolType), [])
 
-pub const string_type = TypeConstructor(BuiltInType("String"), [])
+pub const string_type = TypeConstructor(BuiltInType(StringType), [])
+
+pub fn list_type(item_type: Type) {
+  TypeConstructor(BuiltInType(ListType), [item_type])
+}
 
 pub type Variant {
   Variant(name: String, fields: List(Field(Type)))
@@ -98,12 +119,14 @@ pub type Expression {
   Negate(typ: Type, operand: Expression)
   Trap(typ: Type, kind: TrapKind, detail: Option(Expression))
   Tuple(typ: Type, args: List(Expression))
+  // TODO: maybe should have FunctionId type and a BuiltInFunction constructor to grab built-in stuff as functions?
   FunctionReference(typ: Type, module: ModuleId, name: String)
   Fn(
     typ: Type,
     argument_names: List(glance.AssignmentName),
     body: List(Statement),
   )
+  // TODO: represent as Call of a built-in function?
   FieldAccess(typ: Type, container: Expression, label: String)
   // TODO: consider storing a Type on Call otherwise it may be a pain
   Call(function: Expression, arguments: List(Expression))
@@ -790,14 +813,12 @@ pub fn resolve_type(
         Error(e) ->
           // TODO: can probably handle via lookup instead
           case name, module_option, params {
-            "Int", None, [] -> Ok(TypeConstructor(BuiltInType("Int"), []))
-            "Float", None, [] -> Ok(TypeConstructor(BuiltInType("Float"), []))
-            "String", None, [] -> Ok(TypeConstructor(BuiltInType("String"), []))
+            "Int", None, [] -> Ok(int_type)
+            "Float", None, [] -> Ok(float_type)
+            "String", None, [] -> Ok(string_type)
             "List", None, [item_type] ->
               resolve_type(data, item_type)
-              |> result.map(fn(resolved) {
-                TypeConstructor(BuiltInType("List"), [resolved])
-              })
+              |> result.map(list_type)
             _, _, _ -> Error(e)
           }
       }
