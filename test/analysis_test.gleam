@@ -434,12 +434,12 @@ pub fn type_infer_function_test() {
       ),
       argument_names: [glance.Named("x"), glance.Named("y")],
       body: [
-        analysis.BinaryOperator(
+        analysis.Expression(analysis.BinaryOperator(
           analysis.TypeVariable("$2"),
           glance.MultInt,
           analysis.Variable(analysis.TypeVariable("$3"), "x"),
           analysis.Variable(analysis.TypeVariable("$4"), "y"),
-        ),
+        )),
       ],
     )
 
@@ -475,12 +475,12 @@ pub fn type_infer_function_test() {
       typ: analysis.FunctionType([int_type, int_type], int_type),
       argument_names: [glance.Named("x"), glance.Named("y")],
       body: [
-        analysis.BinaryOperator(
+        analysis.Expression(analysis.BinaryOperator(
           int_type,
           glance.MultInt,
           analysis.Variable(int_type, "x"),
           analysis.Variable(int_type, "y"),
-        ),
+        )),
       ],
     )
 
@@ -500,7 +500,7 @@ pub fn type_infer_function_test() {
   initd_fn |> should.equal(fn_with_blanks)
   context.constraints |> should.equal(constraints)
 
-  let assert Ok(analysis.Context(substitution: subst, ..)) =
+  let assert Ok(subst) =
     context
     |> analysis.solve_constraints
 
@@ -545,13 +545,15 @@ pub fn type_infer_function_using_import_test() {
       ),
       argument_names: [glance.Named("x")],
       body: [
-        analysis.Call(
-          analysis.FunctionReference(
-            analysis.FunctionType([int_type], string_type),
-            module_int.location,
-            "to_string",
+        analysis.Expression(
+          analysis.Call(
+            analysis.FunctionReference(
+              analysis.FunctionType([int_type], string_type),
+              module_int.location,
+              "to_string",
+            ),
+            [analysis.Variable(analysis.TypeVariable("$3"), "x")],
           ),
-          [analysis.Variable(analysis.TypeVariable("$3"), "x")],
         ),
       ],
     )
@@ -593,13 +595,15 @@ pub fn type_infer_function_using_import_test() {
       typ: analysis.FunctionType([int_type], string_type),
       argument_names: [glance.Named("x")],
       body: [
-        analysis.Call(
-          analysis.FunctionReference(
-            analysis.FunctionType([int_type], string_type),
-            module_int.location,
-            "to_string",
+        analysis.Expression(
+          analysis.Call(
+            analysis.FunctionReference(
+              analysis.FunctionType([int_type], string_type),
+              module_int.location,
+              "to_string",
+            ),
+            [analysis.Variable(int_type, "x")],
           ),
-          [analysis.Variable(int_type, "x")],
         ),
       ],
     )
@@ -623,14 +627,14 @@ pub fn type_infer_function_using_import_test() {
   initd_fn |> should.equal(fn_with_blanks)
   context.constraints |> should.equal(constraints)
 
-  let assert Ok(analysis.Context(substitution: subst, ..)) =
+  let assert Ok(subst) =
     context
     |> analysis.solve_constraints
 
   subst
   |> should.equal(substitution)
 
-  fn_with_blanks
+  initd_fn
   |> analysis.substitute_expression(substitution)
   |> should.equal(typed_fn)
 }
@@ -655,7 +659,9 @@ pub fn type_infer_function_with_return_annotation_test() {
   |> result.map(pair.second)
   |> should.equal(
     Ok(
-      analysis.Fn(analysis.FunctionType([], int_type), [], [analysis.Int("42")]),
+      analysis.Fn(analysis.FunctionType([], int_type), [], [
+        analysis.Expression(analysis.Int("42")),
+      ]),
     ),
   )
 
@@ -679,7 +685,90 @@ pub fn type_infer_function_with_return_annotation_test() {
   |> result.map(pair.second)
   |> should.equal(
     Ok(
-      analysis.Fn(analysis.FunctionType([], int_type), [], [analysis.Int("42")]),
+      analysis.Fn(analysis.FunctionType([], int_type), [], [
+        analysis.Expression(analysis.Int("42")),
+      ]),
+    ),
+  )
+
+  let option_module_id = project.SourceLocation("gleam_stdlib", "gleam/option")
+  let option_type =
+    analysis.TypeConstructor(
+      analysis.TypeFromModule(option_module_id, "Option"),
+      [analysis.TypeVariable("a")],
+    )
+  let option_module =
+    analysis.Module(
+      location: option_module_id,
+      imports: dict.new(),
+      types: dict.from_list([
+        #("option", analysis.GenericType(option_type, ["a"])),
+      ]),
+      custom_types: dict.new(),
+      functions: dict.from_list([
+        #(
+          "Some",
+          analysis.FunctionType([analysis.TypeVariable("a")], option_type),
+        ),
+      ]),
+    )
+
+  // fn(x) { Some(x) }
+  glance.Fn([glance.FnParameter(glance.Named("x"), None)], None, [
+    glance.Expression(
+      glance.Call(glance.FieldAccess(glance.Variable("option"), "Some"), [
+        glance.Field(None, glance.Variable("x")),
+      ]),
+    ),
+  ])
+  |> analysis.infer(
+    analysis.ModuleInternals(
+      ..empty_module_internals("foo", "bar"),
+      imports: dict.from_list([#("option", option_module)]),
+    ),
+  )
+  |> should.equal(
+    Ok(
+      analysis.Fn(
+        analysis.FunctionType([analysis.TypeVariable("a")], option_type),
+        [glance.Named("x")],
+        [
+          analysis.Expression(
+            analysis.Call(
+              analysis.FunctionReference(
+                analysis.FunctionType([analysis.TypeVariable("a")], option_type),
+                option_module_id,
+                "Some",
+              ),
+              [analysis.Variable(analysis.TypeVariable("a"), "x")],
+            ),
+          ),
+        ],
+      ),
+    ),
+  )
+}
+
+pub fn type_infer_block_test() {
+  glance.Block([
+    glance.Assignment(
+      kind: glance.Let,
+      pattern: glance.PatternVariable("x"),
+      annotation: option.None,
+      value: glance.Int("42"),
+    ),
+    glance.Expression(glance.Variable("x")),
+  ])
+  |> analysis.infer(empty_module_internals("foo", "bar"))
+  |> should.equal(
+    Ok(
+      analysis.Call(
+        analysis.Fn(analysis.FunctionType([], analysis.int_type), [], [
+          analysis.Assignment("x", analysis.Int("42")),
+          analysis.Expression(analysis.Variable(analysis.int_type, "x")),
+        ]),
+        [],
+      ),
     ),
   )
 }

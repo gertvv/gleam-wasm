@@ -12,6 +12,14 @@ import gleam/string
 import pprint
 import project.{type ModuleId, type Project}
 
+// TODO: next steps?
+// - complete inference for all expression types
+// - constructors for lists: Empty, NonEmpty & results: Ok, Error
+// - pattern matching
+// - add constructors to a module's functions
+// - inference for mutually recursive functions? call graph analysis?
+// - constants
+
 pub type TypeId {
   BuiltInType(name: String)
   TypeFromModule(module: ModuleId, name: String)
@@ -36,7 +44,15 @@ pub type Type {
   TypeVariable(name: String)
 }
 
-const int_type = TypeConstructor(BuiltInType("Int"), [])
+pub const nil_type = TypeConstructor(BuiltInType("Nil"), [])
+
+pub const int_type = TypeConstructor(BuiltInType("Int"), [])
+
+pub const float_type = TypeConstructor(BuiltInType("Float"), [])
+
+pub const bool_type = TypeConstructor(BuiltInType("Bool"), [])
+
+pub const string_type = TypeConstructor(BuiltInType("String"), [])
 
 pub type Variant {
   Variant(name: String, fields: List(Field(Type)))
@@ -68,26 +84,42 @@ pub type ModuleDetail {
   ModuleDetail(module: Module)
 }
 
+pub type TrapKind {
+  Panic
+  Todo
+}
+
 // Expression with types
 pub type Expression {
   Int(val: String)
+  Float(val: String)
   String(val: String)
   Variable(typ: Type, name: String)
+  Negate(typ: Type, operand: Expression)
+  Trap(typ: Type, kind: TrapKind, detail: Option(Expression))
+  Tuple(typ: Type, args: List(Expression))
   FunctionReference(typ: Type, module: ModuleId, name: String)
   Fn(
     typ: Type,
     argument_names: List(glance.AssignmentName),
-    body: List(Expression),
-    // TODO: should take Statement instead
+    body: List(Statement),
   )
   FieldAccess(typ: Type, container: Expression, label: String)
+  // TODO: consider storing a Type on Call otherwise it may be a pain
   Call(function: Expression, arguments: List(Expression))
+  // TODO: consider treating all operators as functions
   BinaryOperator(
     typ: Type,
     name: glance.BinaryOperator,
     left: Expression,
     right: Expression,
   )
+}
+
+pub type Statement {
+  // TODO: generalize (patterns)
+  Assignment(name: String, value: Expression)
+  Expression(expression: Expression)
 }
 
 pub type Constraint {
@@ -143,6 +175,94 @@ fn add_substitution(context: Context, name: String, typ: Type) -> Context {
   Context(..context, substitution: dict.insert(context.substitution, name, typ))
 }
 
+fn init_inference_block_internal(
+  list: List(glance.Statement),
+  expected_type: Type,
+  environment: Dict(String, Type),
+  context: Context,
+  acc: List(Statement),
+) -> Result(#(Context, List(Statement)), CompilerError) {
+  case list {
+    [] -> {
+      // empty blocks have nil type
+      Ok(#(add_constraint(context, Equal(expected_type, nil_type)), []))
+    }
+    [stmt] -> {
+      // last statement in the block must produce the block's expected_type
+      init_inference_statement(stmt, expected_type, environment, context)
+      |> result.map(fn(res) {
+        let #(context, _, stmt) = res
+        #(context, [stmt, ..acc])
+      })
+    }
+    [stmt, ..tail] -> {
+      // other statements in the block expand the environment
+      let #(context, variable_type) = fresh_type_variable(context)
+      init_inference_statement(stmt, variable_type, environment, context)
+      |> result.try(fn(res) {
+        let #(context, environment, stmt) = res
+        init_inference_block_internal(
+          tail,
+          expected_type,
+          environment,
+          context,
+          [stmt, ..acc],
+        )
+      })
+    }
+  }
+}
+
+pub fn init_inference_block(
+  list: List(glance.Statement),
+  expected_type: Type,
+  environment: Dict(String, Type),
+  context: Context,
+) -> Result(#(Context, List(Statement)), CompilerError) {
+  init_inference_block_internal(list, expected_type, environment, context, [])
+  |> result.map(pair.map_second(_, list.reverse))
+}
+
+pub fn init_inference_statement(
+  stmt: glance.Statement,
+  expected_type: Type,
+  environment: Dict(String, Type),
+  context: Context,
+) -> Result(#(Context, Dict(String, Type), Statement), CompilerError) {
+  case stmt {
+    glance.Assignment(
+      kind: glance.Let,
+      pattern: glance.PatternVariable(name),
+      annotation: annotation,
+      value: expr,
+    ) -> {
+      use #(context, assignment_type) <- result.try(resolve_optional_type(
+        context,
+        annotation,
+      ))
+      use #(context, expr) <- result.map(init_inference(
+        expr,
+        assignment_type,
+        environment,
+        context,
+      ))
+      #(
+        context,
+        dict.insert(environment, name, assignment_type),
+        Assignment(name, expr),
+      )
+    }
+    glance.Assignment(_, _, _, _) -> todo
+    glance.Expression(expr) ->
+      init_inference(expr, expected_type, environment, context)
+      |> result.map(fn(res) {
+        let #(context, expr) = res
+        #(context, environment, Expression(expr))
+      })
+    glance.Use(_, _) -> todo
+  }
+}
+
 pub fn init_inference(
   expr: glance.Expression,
   expected_type: Type,
@@ -152,6 +272,18 @@ pub fn init_inference(
   case expr {
     glance.Int(value) -> {
       Ok(#(add_constraint(context, Equal(expected_type, int_type)), Int(value)))
+    }
+    glance.Float(value) -> {
+      Ok(#(
+        add_constraint(context, Equal(expected_type, float_type)),
+        Float(value),
+      ))
+    }
+    glance.String(value) -> {
+      Ok(#(
+        add_constraint(context, Equal(expected_type, string_type)),
+        String(value),
+      ))
     }
     glance.Variable(name) -> {
       use variable_type <- result.map(
@@ -163,7 +295,72 @@ pub fn init_inference(
         Variable(variable_type, name),
       )
     }
-    glance.Fn(args, return, [glance.Expression(body)]) -> {
+    glance.NegateInt(expr) | glance.NegateBool(expr) -> {
+      let #(expr_type, construct) = case expr {
+        glance.NegateInt(_) -> #(int_type, Negate(int_type, _))
+        _ -> #(bool_type, Negate(bool_type, _))
+      }
+      use #(context, operand) <- result.map(init_inference(
+        expr,
+        expr_type,
+        environment,
+        context,
+      ))
+      #(
+        Context(
+          ..context,
+          constraints: [Equal(expected_type, expr_type), ..context.constraints],
+        ),
+        construct(operand),
+      )
+    }
+    glance.Block(body) -> {
+      use #(context, body) <- result.map(init_inference_block(
+        body,
+        expected_type,
+        environment,
+        context,
+      ))
+      #(context, Call(Fn(FunctionType([], expected_type), [], body), []))
+    }
+    glance.Panic(maybe_expr) | glance.Todo(maybe_expr) -> {
+      let construct = case expr {
+        glance.Panic(_) -> Trap(expected_type, Panic, _)
+        _ -> Trap(expected_type, Todo, _)
+      }
+      case maybe_expr {
+        None -> Ok(#(context, construct(None)))
+        Some(expr) ->
+          init_inference(expr, string_type, environment, context)
+          |> result.map(fn(res) {
+            let #(context, expr) = res
+            #(context, construct(Some(expr)))
+          })
+      }
+    }
+    glance.Tuple(args) -> {
+      // TODO: borrows heavily from Call - consider treating as Call
+      let #(context, arg_types) =
+        args
+        |> list.map_fold(from: context, with: fn(context, _) {
+          fresh_type_variable(context)
+        })
+      let tuple_type = TupleType(arg_types)
+      use #(context, args) <- result.map(
+        list.zip(args, arg_types)
+        |> list.try_fold(from: #(context, []), with: fn(acc_pair, arg_pair) {
+          let #(context, acc) = acc_pair
+          let #(arg, arg_type) = arg_pair
+          init_inference(arg, arg_type, environment, context)
+          |> result.map(fn(res) {
+            let #(context, expr) = res
+            #(context, [expr, ..acc])
+          })
+        }),
+      )
+      #(context, Tuple(tuple_type, list.reverse(args)))
+    }
+    glance.Fn(args, return, body) -> {
       use #(context, return_type) <- result.try(resolve_optional_type(
         context,
         return,
@@ -185,7 +382,7 @@ pub fn init_inference(
         })
         |> dict.from_list
         |> dict.merge(environment, _)
-      use #(context, body) <- result.map(init_inference(
+      use #(context, body) <- result.map(init_inference_block(
         body,
         return_type,
         environment,
@@ -194,7 +391,7 @@ pub fn init_inference(
       let fn_type = FunctionType(param_types, return_type)
       #(
         add_constraint(context, Equal(expected_type, fn_type)),
-        Fn(fn_type, list.map(args, fn(arg) { arg.name }), [body]),
+        Fn(fn_type, list.map(args, fn(arg) { arg.name }), body),
       )
     }
     glance.Call(function, args) -> {
@@ -247,25 +444,60 @@ pub fn init_inference(
       // todo
       //})
     }
-    glance.BinaryOperator(glance.MultInt, left, right) -> {
+    glance.BinaryOperator(glance.Pipe, left, right) -> todo
+    glance.BinaryOperator(operator, left, right) -> {
+      let #(context, operand_type, result_type) = case operator {
+        glance.And | glance.Or -> #(context, bool_type, bool_type)
+        glance.Eq | glance.NotEq ->
+          fresh_type_variable(context)
+          |> fn(pair) {
+            let #(context, type_variable) = pair
+            #(context, type_variable, bool_type)
+          }
+        glance.LtInt | glance.LtEqInt | glance.GtEqInt | glance.GtInt -> #(
+          context,
+          int_type,
+          bool_type,
+        )
+        glance.LtFloat | glance.LtEqFloat | glance.GtEqFloat | glance.GtFloat -> #(
+          context,
+          float_type,
+          bool_type,
+        )
+        glance.AddInt
+        | glance.SubInt
+        | glance.MultInt
+        | glance.DivInt
+        | glance.RemainderInt -> #(context, int_type, int_type)
+        glance.AddFloat | glance.SubFloat | glance.MultFloat | glance.DivFloat -> #(
+          context,
+          float_type,
+          float_type,
+        )
+        glance.Concatenate -> #(context, string_type, string_type)
+        glance.Pipe -> panic
+      }
       use #(context, left) <- result.try(init_inference(
         left,
-        int_type,
+        operand_type,
         environment,
         context,
       ))
       use #(context, right) <- result.map(init_inference(
         right,
-        int_type,
+        operand_type,
         environment,
         context,
       ))
       #(
         Context(
           ..context,
-          constraints: [Equal(expected_type, int_type), ..context.constraints],
+          constraints: [
+            Equal(expected_type, result_type),
+            ..context.constraints
+          ],
         ),
-        BinaryOperator(expected_type, glance.MultInt, left, right),
+        BinaryOperator(expected_type, operator, left, right),
       )
     }
     _ -> todo
@@ -323,8 +555,9 @@ fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
   }
 }
 
-// TODO: maybe should return just a substitution?
-pub fn solve_constraints(context: Context) -> Result(Context, CompilerError) {
+pub fn solve_constraints(
+  context: Context,
+) -> Result(Dict(String, Type), CompilerError) {
   list.try_fold(
     over: context.constraints,
     from: context,
@@ -333,7 +566,7 @@ pub fn solve_constraints(context: Context) -> Result(Context, CompilerError) {
       unify(context, a, b)
     },
   )
-  |> result.map(fn(context) { Context(..context, constraints: []) })
+  |> result.map(fn(context) { context.substitution })
 }
 
 pub fn substitute(t: Type, subs: Dict(String, Type)) -> Type {
@@ -346,7 +579,34 @@ pub fn substitute(t: Type, subs: Dict(String, Type)) -> Type {
     TypeConstructor(id, assigned) ->
       TypeConstructor(id, list.map(assigned, substitute(_, subs)))
     TupleType(_) -> todo
-    TypeVariable(name) -> dict.get(subs, name) |> result.unwrap(t)
+    TypeVariable(name) ->
+      dict.get(subs, name)
+      |> result.unwrap(t)
+      |> fn(type_) {
+        // TODO: recurse here or improve solve_constraints to eliminate the need?
+        case type_ {
+          TypeVariable(other_name) if other_name == name -> type_
+          _ -> substitute(type_, subs)
+        }
+      }
+  }
+}
+
+pub fn substitute_statement_list(
+  list: List(Statement),
+  subs: Dict(String, Type),
+) -> List(Statement) {
+  list.map(list, substitute_statement(_, subs))
+}
+
+pub fn substitute_statement(
+  stmt: Statement,
+  subs: Dict(String, Type),
+) -> Statement {
+  case stmt {
+    Expression(expr) -> Expression(substitute_expression(expr, subs))
+    Assignment(name, expr) ->
+      Assignment(name, substitute_expression(expr, subs))
   }
 }
 
@@ -355,6 +615,7 @@ pub fn substitute_expression(
   subs: Dict(String, Type),
 ) -> Expression {
   case expr {
+    Int(_) | Float(_) | String(_) -> expr
     BinaryOperator(t, op, l, r) ->
       BinaryOperator(
         substitute(t, subs),
@@ -366,10 +627,8 @@ pub fn substitute_expression(
       Fn(
         substitute(t, subs),
         param_names,
-        list.map(body, substitute_expression(_, subs)),
+        substitute_statement_list(body, subs),
       )
-    Int(_) -> expr
-    String(_) -> expr
     Variable(t, name) -> Variable(substitute(t, subs), name)
     Call(function, args) ->
       Call(
@@ -379,7 +638,50 @@ pub fn substitute_expression(
     FieldAccess(_, _, _) -> todo
     FunctionReference(t, loc, name) ->
       FunctionReference(substitute(t, subs), loc, name)
+    Negate(t, operand) ->
+      Negate(substitute(t, subs), substitute_expression(operand, subs))
+    Trap(t, kind, maybe_expr) ->
+      Trap(
+        substitute(t, subs),
+        kind,
+        option.map(maybe_expr, substitute_expression(_, subs)),
+      )
+    Tuple(t, args) ->
+      Tuple(substitute(t, subs), list.map(args, substitute_expression(_, subs)))
   }
+}
+
+pub fn infer(
+  expr: glance.Expression,
+  data: ModuleInternals,
+) -> Result(Expression, CompilerError) {
+  init_inference(
+    expr,
+    TypeVariable("$1"),
+    dict.new(),
+    Context(data, dict.from_list([#("$1", TypeVariable("$1"))]), [], 2),
+  )
+  |> result.try(fn(initd) {
+    let #(context, initd_fn) = initd
+    solve_constraints(context)
+    |> result.map(substitute_expression(initd_fn, _))
+  })
+}
+
+pub fn infer_function(
+  data: ModuleInternals,
+  def: glance.Definition(glance.Function),
+) -> Result(#(String, Expression), CompilerError) {
+  infer(
+    glance.Fn(
+      def.definition.parameters
+        |> list.map(fn(p) { glance.FnParameter(p.name, p.type_) }),
+      def.definition.return,
+      def.definition.body,
+    ),
+    data,
+  )
+  |> result.map(fn(expr) { #(def.definition.name, expr) })
 }
 
 fn resolve_module(
@@ -706,16 +1008,35 @@ fn analyze_high_level(
     }),
   )
   let imports = dict.from_list(imports)
-  use #(types, custom_types) <- result.map(resolve_types(
+  use #(types, custom_types) <- result.try(resolve_types(
     project,
     location,
     imports,
     modules,
     parsed,
   ))
-  // TODO: resolve constants and functions
+  // TODO: resolve constants
+  // TODO: fix duplication of this with resolve_types
+  let imported_modules =
+    imports
+    |> dict.map_values(fn(_, loc) {
+      let assert Ok(module) = dict.get(modules, loc)
+      module
+    })
+  let internals = ModuleInternals(project, location, imported_modules, types)
+  // TODO: hack!
+  use functions <- result.map(
+    parsed.functions
+    |> list.try_map(infer_function(internals, _))
+    |> result.map(list.map(_, fn(fndef) {
+      let assert #(name, Fn(typ: t, ..)) = fndef
+      #(name, t)
+    }))
+    |> result.map(dict.from_list),
+  )
+
   // TODO: filter to only public parts
-  #(Module(location, imports, types, custom_types, dict.new()), modules)
+  #(Module(location, imports, types, custom_types, functions), modules)
 }
 
 pub fn analyze_module(
@@ -767,7 +1088,7 @@ pub fn main() {
   |> result.try(fn(project) {
     analyze_module(
       project,
-      project.SourceLocation(project.name, "stub"),
+      project.SourceLocation(project.name, "example"),
       dict.new(),
     )
   })
