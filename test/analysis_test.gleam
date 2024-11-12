@@ -436,11 +436,19 @@ pub fn type_infer_function_test() {
       ),
       argument_names: [glance.Named("x"), glance.Named("y")],
       body: [
-        analysis.Expression(analysis.BinaryOperator(
-          analysis.TypeVariable("$2"),
-          glance.MultInt,
-          analysis.Variable(analysis.TypeVariable("$3"), "x"),
-          analysis.Variable(analysis.TypeVariable("$4"), "y"),
+        analysis.Expression(analysis.Call(
+          //analysis.TypeVariable("$2"),
+          analysis.FunctionReference(
+            analysis.FunctionType(
+              [analysis.int_type, analysis.int_type],
+              analysis.int_type,
+            ),
+            analysis.BuiltInFunction(analysis.BinaryOperator(glance.MultInt)),
+          ),
+          [
+            analysis.Variable(analysis.TypeVariable("$3"), "x"),
+            analysis.Variable(analysis.TypeVariable("$4"), "y"),
+          ],
         )),
       ],
     )
@@ -480,11 +488,19 @@ pub fn type_infer_function_test() {
       ),
       argument_names: [glance.Named("x"), glance.Named("y")],
       body: [
-        analysis.Expression(analysis.BinaryOperator(
-          analysis.int_type,
-          glance.MultInt,
-          analysis.Variable(analysis.int_type, "x"),
-          analysis.Variable(analysis.int_type, "y"),
+        analysis.Expression(analysis.Call(
+          //analysis.TypeVariable("$2"),
+          analysis.FunctionReference(
+            analysis.FunctionType(
+              [analysis.int_type, analysis.int_type],
+              analysis.int_type,
+            ),
+            analysis.BuiltInFunction(analysis.BinaryOperator(glance.MultInt)),
+          ),
+          [
+            analysis.Variable(analysis.int_type, "x"),
+            analysis.Variable(analysis.int_type, "y"),
+          ],
         )),
       ],
     )
@@ -555,8 +571,7 @@ pub fn type_infer_function_using_import_test() {
           analysis.Call(
             analysis.FunctionReference(
               analysis.FunctionType([analysis.int_type], analysis.string_type),
-              module_int.location,
-              "to_string",
+              analysis.FunctionFromModule(module_int.location, "to_string"),
             ),
             [analysis.Variable(analysis.TypeVariable("$3"), "x")],
           ),
@@ -605,8 +620,7 @@ pub fn type_infer_function_using_import_test() {
           analysis.Call(
             analysis.FunctionReference(
               analysis.FunctionType([analysis.int_type], analysis.string_type),
-              module_int.location,
-              "to_string",
+              analysis.FunctionFromModule(module_int.location, "to_string"),
             ),
             [analysis.Variable(analysis.int_type, "x")],
           ),
@@ -743,8 +757,7 @@ pub fn type_infer_function_with_return_annotation_test() {
             analysis.Call(
               analysis.FunctionReference(
                 analysis.FunctionType([analysis.TypeVariable("a")], option_type),
-                option_module_id,
-                "Some",
+                analysis.FunctionFromModule(option_module_id, "Some"),
               ),
               [analysis.Variable(analysis.TypeVariable("a"), "x")],
             ),

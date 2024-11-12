@@ -35,11 +35,28 @@ pub type BuiltInType {
   BoolType
   StringType
   ListType
+  TupleType(Int)
 }
 
 pub type TypeId {
   BuiltInType(BuiltInType)
   TypeFromModule(module: ModuleId, name: String)
+}
+
+pub type BuiltInFunction {
+  TupleConstructor(Int)
+  //IndexTuple
+  //EmptyListConstructor
+  //NonEmptyListConstructor
+  //AccessField
+  NegateInt
+  NegateBool
+  BinaryOperator(glance.BinaryOperator)
+}
+
+pub type FunctionId {
+  BuiltInFunction(BuiltInFunction)
+  FunctionFromModule(module: ModuleId, name: String)
 }
 
 // fully resolved types
@@ -54,8 +71,6 @@ pub type GenericType {
 
 pub type Type {
   TypeConstructor(generic_type: TypeId, assigned_types: List(Type))
-  // TODO: make TypeConstructor? (Add a TypeId constructor TupleType(arity))
-  TupleType(elements: List(Type))
   // TODO: make TypeConstructor? (Add a TypeId constructor FunctionType(arity))
   FunctionType(parameters: List(Type), return: Type)
   TypeVariable(name: String)
@@ -116,11 +131,9 @@ pub type Expression {
   Float(val: String)
   String(val: String)
   Variable(typ: Type, name: String)
-  Negate(typ: Type, operand: Expression)
   Trap(typ: Type, kind: TrapKind, detail: Option(Expression))
-  Tuple(typ: Type, args: List(Expression))
   // TODO: maybe should have FunctionId type and a BuiltInFunction constructor to grab built-in stuff as functions?
-  FunctionReference(typ: Type, module: ModuleId, name: String)
+  FunctionReference(typ: Type, id: FunctionId)
   Fn(
     typ: Type,
     argument_names: List(glance.AssignmentName),
@@ -130,13 +143,6 @@ pub type Expression {
   FieldAccess(typ: Type, container: Expression, label: String)
   // TODO: consider storing a Type on Call otherwise it may be a pain
   Call(function: Expression, arguments: List(Expression))
-  // TODO: consider treating all operators as functions
-  BinaryOperator(
-    typ: Type,
-    name: glance.BinaryOperator,
-    left: Expression,
-    right: Expression,
-  )
 }
 
 pub type Statement {
@@ -286,6 +292,85 @@ pub fn init_inference_statement(
   }
 }
 
+fn init_inference_call(
+  function: Expression,
+  arg_types: List(Type),
+  args: List(glance.Expression),
+  environment: Dict(String, Type),
+  context: Context,
+) -> Result(#(Context, Expression), CompilerError) {
+  list.zip(args, arg_types)
+  |> list.try_fold(from: #(context, []), with: fn(acc_pair, arg_pair) {
+    let #(context, acc) = acc_pair
+    let #(arg, arg_type) = arg_pair
+    init_inference(arg, arg_type, environment, context)
+    |> result.map(fn(res) {
+      let #(context, expr) = res
+      #(context, [expr, ..acc])
+    })
+  })
+  |> result.map(fn(res) {
+    let #(context, args) = res
+    #(context, Call(function, list.reverse(args)))
+  })
+}
+
+fn init_inference_call_builtin(
+  built_in_function: BuiltInFunction,
+  args: List(glance.Expression),
+  expected_type: Type,
+  environment: Dict(String, Type),
+  context: Context,
+) {
+  let #(context, arg_types, return_type) = case built_in_function {
+    //AccessField -> FunctionType([TypeVariable("a")], TypeVariable("b"))
+    BinaryOperator(operator) -> {
+      let #(operand_type, result_type) = case operator {
+        glance.And | glance.Or -> #(bool_type, bool_type)
+        glance.Eq | glance.NotEq -> #(TypeVariable("a"), bool_type)
+        glance.LtInt | glance.LtEqInt | glance.GtEqInt | glance.GtInt -> #(
+          int_type,
+          bool_type,
+        )
+        glance.LtFloat | glance.LtEqFloat | glance.GtEqFloat | glance.GtFloat -> #(
+          float_type,
+          bool_type,
+        )
+        glance.AddInt
+        | glance.SubInt
+        | glance.MultInt
+        | glance.DivInt
+        | glance.RemainderInt -> #(int_type, int_type)
+        glance.AddFloat | glance.SubFloat | glance.MultFloat | glance.DivFloat -> #(
+          float_type,
+          float_type,
+        )
+        glance.Concatenate -> #(string_type, string_type)
+        glance.Pipe -> panic
+      }
+      #(context, [operand_type, operand_type], result_type)
+    }
+    NegateBool -> #(context, [bool_type], bool_type)
+    NegateInt -> #(context, [int_type], int_type)
+    TupleConstructor(arity) -> {
+      let #(context, types) =
+        list.range(1, arity)
+        |> list.map_fold(context, fn(context, _) {
+          fresh_type_variable(context)
+        })
+      #(context, types, TypeConstructor(BuiltInType(TupleType(arity)), types))
+    }
+  }
+  let function_type = FunctionType(arg_types, return_type)
+  let function =
+    FunctionReference(function_type, BuiltInFunction(built_in_function))
+  init_inference_call(function, arg_types, args, environment, context)
+  |> result.map(fn(res) {
+    let #(context, expr) = res
+    #(add_constraint(context, Equal(expected_type, return_type)), expr)
+  })
+}
+
 pub fn init_inference(
   expr: glance.Expression,
   expected_type: Type,
@@ -318,25 +403,22 @@ pub fn init_inference(
         Variable(variable_type, name),
       )
     }
-    glance.NegateInt(expr) | glance.NegateBool(expr) -> {
-      let #(expr_type, construct) = case expr {
-        glance.NegateInt(_) -> #(int_type, Negate(int_type, _))
-        _ -> #(bool_type, Negate(bool_type, _))
-      }
-      use #(context, operand) <- result.map(init_inference(
-        expr,
-        expr_type,
+    glance.NegateInt(expr) ->
+      init_inference_call_builtin(
+        NegateInt,
+        [expr],
+        expected_type,
         environment,
         context,
-      ))
-      #(
-        Context(
-          ..context,
-          constraints: [Equal(expected_type, expr_type), ..context.constraints],
-        ),
-        construct(operand),
       )
-    }
+    glance.NegateBool(expr) ->
+      init_inference_call_builtin(
+        NegateBool,
+        [expr],
+        expected_type,
+        environment,
+        context,
+      )
     glance.Block(body) -> {
       use #(context, body) <- result.map(init_inference_block(
         body,
@@ -362,27 +444,15 @@ pub fn init_inference(
       }
     }
     glance.Tuple(args) -> {
-      // TODO: borrows heavily from Call - consider treating as Call
-      let #(context, arg_types) =
-        args
-        |> list.map_fold(from: context, with: fn(context, _) {
-          fresh_type_variable(context)
-        })
-      let tuple_type = TupleType(arg_types)
-      use #(context, args) <- result.map(
-        list.zip(args, arg_types)
-        |> list.try_fold(from: #(context, []), with: fn(acc_pair, arg_pair) {
-          let #(context, acc) = acc_pair
-          let #(arg, arg_type) = arg_pair
-          init_inference(arg, arg_type, environment, context)
-          |> result.map(fn(res) {
-            let #(context, expr) = res
-            #(context, [expr, ..acc])
-          })
-        }),
+      init_inference_call_builtin(
+        TupleConstructor(list.length(args)),
+        args,
+        expected_type,
+        environment,
+        context,
       )
-      #(context, Tuple(tuple_type, list.reverse(args)))
     }
+    glance.List(_, _) -> todo
     glance.Fn(args, return, body) -> {
       use #(context, return_type) <- result.try(resolve_optional_type(
         context,
@@ -417,30 +487,7 @@ pub fn init_inference(
         Fn(fn_type, list.map(args, fn(arg) { arg.name }), body),
       )
     }
-    glance.Call(function, args) -> {
-      let #(context, arg_types) =
-        args
-        |> list.map_fold(from: context, with: fn(context, _) {
-          fresh_type_variable(context)
-        })
-      let fn_type = FunctionType(arg_types, expected_type)
-      use #(context, function) <- result.try(init_inference(
-        function,
-        fn_type,
-        environment,
-        context,
-      ))
-      use #(context, args) <- result.map(
-        list.zip(args, arg_types)
-        |> list.try_fold(from: #(context, []), with: fn(acc_pair, arg_pair) {
-          let #(context, acc) = acc_pair
-          let #(arg, arg_type) = arg_pair
-          init_inference(arg.item, arg_type, environment, context)
-          |> result.map(fn(r) { #(r.0, [r.1, ..acc]) })
-        }),
-      )
-      #(context, Call(function, list.reverse(args)))
-    }
+    glance.RecordUpdate(_, _, _, _) -> todo
     glance.FieldAccess(container, label) -> {
       // short-cut module field access if possible
       case container {
@@ -455,11 +502,14 @@ pub fn init_inference(
         |> result.map(fn(function_type) {
           #(
             add_constraint(context, Equal(expected_type, function_type)),
-            FunctionReference(function_type, module.location, label),
+            FunctionReference(
+              function_type,
+              FunctionFromModule(module.location, label),
+            ),
           )
         })
       })
-      |> result.try_recover(fn(_) { Error(compiler.AnotherTypeError) })
+      |> result.try_recover(fn(_) { todo })
       //|> result.try_recover(fn() {
       // let #(context, container_type) = fresh_type_variable(context)
       // let #(context, container) =
@@ -467,63 +517,36 @@ pub fn init_inference(
       // todo
       //})
     }
+    glance.Call(function, args) -> {
+      let args = list.map(args, fn(arg) { arg.item })
+      let #(context, arg_types) =
+        args
+        |> list.map_fold(from: context, with: fn(context, _) {
+          fresh_type_variable(context)
+        })
+      let fn_type = FunctionType(arg_types, expected_type)
+      use #(context, function) <- result.try(init_inference(
+        function,
+        fn_type,
+        environment,
+        context,
+      ))
+      init_inference_call(function, arg_types, args, environment, context)
+    }
+    glance.TupleIndex(_, _) -> todo
+    glance.FnCapture(_, _, _, _) -> todo
+    glance.BitString(_) -> todo
+    glance.Case(_, _) -> todo
     glance.BinaryOperator(glance.Pipe, left, right) -> todo
     glance.BinaryOperator(operator, left, right) -> {
-      let #(context, operand_type, result_type) = case operator {
-        glance.And | glance.Or -> #(context, bool_type, bool_type)
-        glance.Eq | glance.NotEq ->
-          fresh_type_variable(context)
-          |> fn(pair) {
-            let #(context, type_variable) = pair
-            #(context, type_variable, bool_type)
-          }
-        glance.LtInt | glance.LtEqInt | glance.GtEqInt | glance.GtInt -> #(
-          context,
-          int_type,
-          bool_type,
-        )
-        glance.LtFloat | glance.LtEqFloat | glance.GtEqFloat | glance.GtFloat -> #(
-          context,
-          float_type,
-          bool_type,
-        )
-        glance.AddInt
-        | glance.SubInt
-        | glance.MultInt
-        | glance.DivInt
-        | glance.RemainderInt -> #(context, int_type, int_type)
-        glance.AddFloat | glance.SubFloat | glance.MultFloat | glance.DivFloat -> #(
-          context,
-          float_type,
-          float_type,
-        )
-        glance.Concatenate -> #(context, string_type, string_type)
-        glance.Pipe -> panic
-      }
-      use #(context, left) <- result.try(init_inference(
-        left,
-        operand_type,
+      init_inference_call_builtin(
+        BinaryOperator(operator),
+        [left, right],
+        expected_type,
         environment,
         context,
-      ))
-      use #(context, right) <- result.map(init_inference(
-        right,
-        operand_type,
-        environment,
-        context,
-      ))
-      #(
-        Context(
-          ..context,
-          constraints: [
-            Equal(expected_type, result_type),
-            ..context.constraints
-          ],
-        ),
-        BinaryOperator(expected_type, operator, left, right),
       )
     }
-    _ -> todo
   }
 }
 
@@ -542,7 +565,6 @@ fn occurs_in(var: String, t: Type) -> Bool {
     TypeVariable(i) -> var == i
     FunctionType(args, ret) -> list.any([ret, ..args], occurs_in(var, _))
     TypeConstructor(_, sub) -> list.any(sub, occurs_in(var, _))
-    TupleType(args) -> list.any(args, occurs_in(var, _))
   }
 }
 
@@ -601,7 +623,6 @@ pub fn substitute(t: Type, subs: Dict(String, Type)) -> Type {
       )
     TypeConstructor(id, assigned) ->
       TypeConstructor(id, list.map(assigned, substitute(_, subs)))
-    TupleType(_) -> todo
     TypeVariable(name) ->
       dict.get(subs, name)
       |> result.unwrap(t)
@@ -639,13 +660,6 @@ pub fn substitute_expression(
 ) -> Expression {
   case expr {
     Int(_) | Float(_) | String(_) -> expr
-    BinaryOperator(t, op, l, r) ->
-      BinaryOperator(
-        substitute(t, subs),
-        op,
-        substitute_expression(l, subs),
-        substitute_expression(r, subs),
-      )
     Fn(t, param_names, body) ->
       Fn(
         substitute(t, subs),
@@ -659,18 +673,13 @@ pub fn substitute_expression(
         list.map(args, substitute_expression(_, subs)),
       )
     FieldAccess(_, _, _) -> todo
-    FunctionReference(t, loc, name) ->
-      FunctionReference(substitute(t, subs), loc, name)
-    Negate(t, operand) ->
-      Negate(substitute(t, subs), substitute_expression(operand, subs))
+    FunctionReference(t, id) -> FunctionReference(substitute(t, subs), id)
     Trap(t, kind, maybe_expr) ->
       Trap(
         substitute(t, subs),
         kind,
         option.map(maybe_expr, substitute_expression(_, subs)),
       )
-    Tuple(t, args) ->
-      Tuple(substitute(t, subs), list.map(args, substitute_expression(_, subs)))
   }
 }
 
@@ -746,7 +755,6 @@ fn find_type_variables(t: Type) -> set.Set(String) {
     FunctionType(param_types, return_type) ->
       union_type_variables([return_type, ..param_types])
     TypeConstructor(_, assigned_types) -> union_type_variables(assigned_types)
-    TupleType(item_types) -> union_type_variables(item_types)
     TypeVariable(name) -> set.from_list([name])
   }
 }
@@ -796,7 +804,7 @@ pub fn resolve_type(
               }))
               |> result.map(fn(params) {
                 case nested_type {
-                  TypeConstructor(_, _) | FunctionType(_, _) | TupleType(_) ->
+                  TypeConstructor(_, _) | FunctionType(_, _) ->
                     substitute(nested_type, dict.from_list(params))
                   TypeVariable(_) ->
                     // If the top-level type we find is a TypeVariable then it is a prototype (placeholder)
