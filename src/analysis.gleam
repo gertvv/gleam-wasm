@@ -5,6 +5,7 @@ import gleam/int
 import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/order
 import gleam/pair
 import gleam/result
 import gleam/set
@@ -48,7 +49,7 @@ pub type BuiltInFunction {
   //IndexTuple
   //EmptyListConstructor
   //NonEmptyListConstructor
-  //AccessField
+  AccessField(String)
   NegateInt
   NegateBool
   BinaryOperator(glance.BinaryOperator)
@@ -153,6 +154,7 @@ pub type Statement {
 
 pub type Constraint {
   Equal(a: Type, b: Type)
+  HasFieldOfType(container: Type, name: String, field: Type)
 }
 
 pub type Context {
@@ -323,7 +325,6 @@ fn init_inference_call_builtin(
   context: Context,
 ) {
   let #(context, arg_types, return_type) = case built_in_function {
-    //AccessField -> FunctionType([TypeVariable("a")], TypeVariable("b"))
     BinaryOperator(operator) -> {
       let #(operand_type, result_type) = case operator {
         glance.And | glance.Or -> #(bool_type, bool_type)
@@ -360,6 +361,17 @@ fn init_inference_call_builtin(
         })
       #(context, types, TypeConstructor(BuiltInType(TupleType(arity)), types))
     }
+    AccessField(name) -> {
+      let #(context, custom_type) = fresh_type_variable(context)
+      #(
+        add_constraint(
+          context,
+          HasFieldOfType(custom_type, name, expected_type),
+        ),
+        [custom_type],
+        expected_type,
+      )
+    }
   }
   let function_type = FunctionType(arg_types, return_type)
   let function =
@@ -394,14 +406,27 @@ pub fn init_inference(
       ))
     }
     glance.Variable(name) -> {
-      use variable_type <- result.map(
+      use <- result.lazy_or(
         dict.get(environment, name)
-        |> result.map_error(fn(_) { compiler.ReferenceError(name) }),
+        |> result.map_error(fn(_) { compiler.ReferenceError(name) })
+        |> result.map(fn(variable_type) {
+          #(
+            add_constraint(context, Equal(expected_type, variable_type)),
+            Variable(variable_type, name),
+          )
+        }),
       )
-      #(
-        add_constraint(context, Equal(expected_type, variable_type)),
-        Variable(variable_type, name),
-      )
+      dict.get(context.internals.functions, name)
+      |> result.map_error(fn(_) { compiler.ReferenceError(name) })
+      |> result.map(fn(function_type) {
+        #(
+          add_constraint(context, Equal(expected_type, function_type)),
+          FunctionReference(
+            function_type,
+            FunctionFromModule(context.internals.location, name),
+          ),
+        )
+      })
     }
     glance.NegateInt(expr) ->
       init_inference_call_builtin(
@@ -509,13 +534,16 @@ pub fn init_inference(
           )
         })
       })
-      |> result.try_recover(fn(_) { todo })
-      //|> result.try_recover(fn() {
-      // let #(context, container_type) = fresh_type_variable(context)
-      // let #(context, container) =
-      //   init_inference(container, container_type, environment, context)
-      // todo
-      //})
+      |> result.map_error(fn(_) { compiler.AnotherTypeError })
+      |> result.lazy_or(fn() {
+        init_inference_call_builtin(
+          AccessField(label),
+          [container],
+          expected_type,
+          environment,
+          context,
+        )
+      })
     }
     glance.Call(function, args) -> {
       let args = list.map(args, fn(arg) { arg.item })
@@ -596,21 +624,97 @@ fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
         True -> Error(compiler.AnotherTypeError)
         False -> Ok(add_substitution(context, j, a))
       }
-    _, _ -> todo
+    TypeConstructor(id_i, args_i), TypeConstructor(id_j, args_j) -> {
+      case id_i == id_j && list.length(args_i) == list.length(args_j) {
+        False -> Error(compiler.AnotherTypeError)
+        True -> {
+          list.zip(args_i, args_j)
+          |> list.try_fold(from: context, with: fn(context, pair) {
+            unify(context, pair.0, pair.1)
+          })
+        }
+      }
+    }
+    FunctionType(_, _), TypeConstructor(_, _)
+    | TypeConstructor(_, _), FunctionType(_, _)
+    -> Error(compiler.AnotherTypeError)
   }
 }
 
 pub fn solve_constraints(
   context: Context,
 ) -> Result(Dict(String, Type), CompilerError) {
-  list.try_fold(
-    over: context.constraints,
-    from: context,
-    with: fn(context, constraint) {
-      let Equal(a, b) = constraint
-      unify(context, a, b)
-    },
-  )
+  list.sort(context.constraints, fn(a, b) {
+    case a, b {
+      Equal(_, _), HasFieldOfType(_, _, _) -> order.Lt
+      Equal(_, _), Equal(_, _) -> order.Eq
+      HasFieldOfType(_, _, _), HasFieldOfType(_, _, _) -> order.Eq
+      HasFieldOfType(_, _, _), Equal(_, _) -> order.Gt
+    }
+  })
+  |> list.try_fold(from: context, with: fn(context, constraint) {
+    case constraint {
+      Equal(a, b) -> unify(context, a, b)
+      HasFieldOfType(container_type, field_name, field_type) -> {
+        use #(module_id, type_name) <- result.try(case container_type {
+          TypeConstructor(TypeFromModule(module_id, type_name), _params) ->
+            Ok(#(module_id, type_name))
+          FunctionType(_, _) -> Error(compiler.AnotherTypeError)
+          TypeConstructor(BuiltInType(_), _) -> Error(compiler.AnotherTypeError)
+          TypeVariable(_) ->
+            case get_sub(context, container_type) {
+              None -> Error(compiler.AnotherTypeError)
+              Some(TypeConstructor(
+                TypeFromModule(module_id, type_name),
+                _params,
+              )) -> Ok(#(module_id, type_name))
+              Some(_) -> Error(compiler.AnotherTypeError)
+            }
+        })
+        use custom_type <- result.try(
+          dict.values(context.internals.imports)
+          |> list.find(fn(module) { module.location == module_id })
+          |> result.map(fn(module) { module.custom_types })
+          |> result.lazy_or(fn() {
+            case context.internals.location == module_id {
+              False -> Error(Nil)
+              True -> Ok(context.internals.custom_types)
+            }
+          })
+          |> result.try(dict.get(_, type_name))
+          |> result.map_error(fn(_) {
+            io.debug("Could not find type")
+            compiler.AnotherTypeError
+          }),
+        )
+        list.try_map(custom_type.variants, fn(variant) {
+          list.find(variant.fields, fn(field) {
+            case field {
+              Field(label: Some(label), ..) -> label == field_name
+              _ -> False
+            }
+          })
+        })
+        |> result.map_error(fn(_) {
+          io.debug("Not all variants have field")
+          compiler.AnotherTypeError
+        })
+        |> result.try(fn(fields) {
+          let types =
+            list.map(fields, fn(field) { field.item })
+            |> list.unique
+          case types {
+            [t] -> Ok(t)
+            _ -> {
+              io.debug("Field type not consistent across variants")
+              Error(compiler.AnotherTypeError)
+            }
+          }
+        })
+        |> result.try(unify(context, _, field_type))
+      }
+    }
+  })
   |> result.map(fn(context) { context.substitution })
 }
 
@@ -741,6 +845,8 @@ pub type ModuleInternals {
     location: ModuleId,
     imports: Dict(String, Module),
     types: Dict(String, GenericType),
+    custom_types: Dict(String, CustomType),
+    functions: Dict(String, Type),
   )
 }
 
@@ -959,7 +1065,14 @@ pub fn resolve_types(
       module
     })
   let internals =
-    ModuleInternals(project, location, imported_modules, prototypes)
+    ModuleInternals(
+      project: project,
+      location: location,
+      imports: imported_modules,
+      types: prototypes,
+      custom_types: dict.new(),
+      functions: dict.new(),
+    )
 
   use aliases <- result.try(
     result.all(list.map(parsed.type_aliases, resolve_type_alias(internals, _))),
@@ -1052,7 +1165,15 @@ fn analyze_high_level(
       let assert Ok(module) = dict.get(modules, loc)
       module
     })
-  let internals = ModuleInternals(project, location, imported_modules, types)
+  let internals =
+    ModuleInternals(
+      project: project,
+      location: location,
+      imports: imported_modules,
+      types: types,
+      custom_types: dict.new(),
+      functions: dict.new(),
+    )
   // TODO: hack!
   use functions <- result.map(
     parsed.functions

@@ -15,7 +15,14 @@ fn empty_module_internals(package_name, module_path) {
       Error(compiler.ReferenceError("test"))
     })
   let location = project.SourceLocation(package_name, module_path)
-  analysis.ModuleInternals(project, location, dict.new(), dict.new())
+  analysis.ModuleInternals(
+    project,
+    location,
+    dict.new(),
+    dict.new(),
+    dict.new(),
+    dict.new(),
+  )
 }
 
 pub fn resolve_basic_types_test() {
@@ -809,6 +816,66 @@ pub fn type_infer_tuple_test() {
           analysis.BuiltInFunction(analysis.TupleConstructor(2)),
         ),
         [analysis.Int("42"), analysis.Float("3.14")],
+      ),
+    ),
+  )
+}
+
+pub fn type_infer_field_access_test() {
+  let module_id = project.SourceLocation("foo", "bar")
+  let my_type =
+    analysis.TypeConstructor(analysis.TypeFromModule(module_id, "MyType"), [])
+  let my_type_definition =
+    analysis.CustomType([], False, [
+      analysis.Variant("VariantA", [
+        analysis.Field(Some("a"), analysis.int_type),
+      ]),
+      analysis.Variant("VariantB", [
+        analysis.Field(Some("a"), analysis.int_type),
+        analysis.Field(Some("b"), analysis.float_type),
+      ]),
+    ])
+  let internals =
+    analysis.ModuleInternals(
+      project: project.Project("name", dict.new(), fn(_, _) { panic }),
+      location: module_id,
+      imports: dict.new(),
+      types: dict.from_list([#("MyType", analysis.GenericType(my_type, []))]),
+      custom_types: dict.from_list([#("MyType", my_type_definition)]),
+      functions: dict.from_list([
+        #("VariantA", analysis.FunctionType([analysis.int_type], my_type)),
+        #(
+          "VariantB",
+          analysis.FunctionType(
+            [analysis.int_type, analysis.float_type],
+            my_type,
+          ),
+        ),
+      ]),
+    )
+  glance.FieldAccess(
+    glance.Call(glance.Variable("VariantA"), [
+      glance.Field(None, glance.Int("42")),
+    ]),
+    "a",
+  )
+  |> analysis.infer(internals)
+  |> should.equal(
+    Ok(
+      analysis.Call(
+        analysis.FunctionReference(
+          analysis.FunctionType([my_type], analysis.int_type),
+          analysis.BuiltInFunction(analysis.AccessField("a")),
+        ),
+        [
+          analysis.Call(
+            analysis.FunctionReference(
+              analysis.FunctionType([analysis.int_type], my_type),
+              analysis.FunctionFromModule(module_id, "VariantA"),
+            ),
+            [analysis.Int("42")],
+          ),
+        ],
       ),
     ),
   )
