@@ -565,7 +565,17 @@ pub fn init_inference(
     glance.FnCapture(_, _, _, _) -> todo
     glance.BitString(_) -> todo
     glance.Case(_, _) -> todo
-    glance.BinaryOperator(glance.Pipe, left, right) -> todo
+    glance.BinaryOperator(glance.Pipe, left, right) ->
+      case right {
+        glance.Call(function, args) ->
+          init_inference(
+            glance.Call(function, [glance.Field(None, left), ..args]),
+            expected_type,
+            environment,
+            context,
+          )
+        _ -> todo
+      }
     glance.BinaryOperator(operator, left, right) -> {
       init_inference_call_builtin(
         BinaryOperator(operator),
@@ -644,6 +654,7 @@ fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
 pub fn solve_constraints(
   context: Context,
 ) -> Result(Dict(String, Type), CompilerError) {
+  // TODO: rather than sort, probably need an iterative / recursive solve
   list.sort(context.constraints, fn(a, b) {
     case a, b {
       Equal(_, _), HasFieldOfType(_, _, _) -> order.Lt
@@ -671,6 +682,7 @@ pub fn solve_constraints(
               Some(_) -> Error(compiler.AnotherTypeError)
             }
         })
+        // TODO: function for looking up custom types
         use custom_type <- result.try(
           dict.values(context.internals.imports)
           |> list.find(fn(module) { module.location == module_id })
@@ -687,6 +699,7 @@ pub fn solve_constraints(
             compiler.AnotherTypeError
           }),
         )
+        // TODO: add fields as an attribute of custom types
         list.try_map(custom_type.variants, fn(variant) {
           list.find(variant.fields, fn(field) {
             case field {

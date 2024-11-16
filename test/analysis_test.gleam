@@ -880,3 +880,44 @@ pub fn type_infer_field_access_test() {
     ),
   )
 }
+
+pub fn pipe_operator_test() {
+  let assert Ok(#(context, expr)) =
+    glance.BinaryOperator(
+      glance.Pipe,
+      glance.Variable("lst"),
+      glance.Call(glance.Variable("map"), [
+        glance.Field(None, glance.Variable("fun")),
+      ]),
+    )
+    |> analysis.init_inference(
+      analysis.TypeVariable("$1"),
+      dict.from_list([
+        #("lst", analysis.TypeVariable("a")),
+        #("map", analysis.TypeVariable("b")),
+        #("fun", analysis.TypeVariable("c")),
+      ]),
+      analysis.Context(empty_module_internals("foo", "bar"), dict.new(), [], 2),
+    )
+
+  context.constraints
+  |> should.equal([
+    analysis.Equal(analysis.TypeVariable("$3"), analysis.TypeVariable("c")),
+    analysis.Equal(analysis.TypeVariable("$2"), analysis.TypeVariable("a")),
+    analysis.Equal(
+      analysis.FunctionType(
+        [analysis.TypeVariable("$2"), analysis.TypeVariable("$3")],
+        analysis.TypeVariable("$1"),
+      ),
+      analysis.TypeVariable("b"),
+    ),
+  ])
+
+  expr
+  |> should.equal(
+    analysis.Call(analysis.Variable(analysis.TypeVariable("b"), "map"), [
+      analysis.Variable(analysis.TypeVariable("a"), "lst"),
+      analysis.Variable(analysis.TypeVariable("c"), "fun"),
+    ]),
+  )
+}
