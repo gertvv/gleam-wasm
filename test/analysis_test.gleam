@@ -881,7 +881,43 @@ pub fn type_infer_field_access_test() {
   )
 }
 
-pub fn pipe_operator_test() {
+pub fn list_inference_test() {
+  let int_list = analysis.list_type(analysis.int_type)
+  let empty_list =
+    analysis.FunctionReference(
+      analysis.FunctionType([], int_list),
+      analysis.BuiltInFunction(analysis.EmptyListConstructor),
+    )
+  let non_empty_list =
+    analysis.FunctionReference(
+      analysis.FunctionType([analysis.int_type, int_list], int_list),
+      analysis.BuiltInFunction(analysis.NonEmptyListConstructor),
+    )
+  glance.List(
+    [glance.Int("1"), glance.Int("2")],
+    Some(glance.List([glance.Int("3"), glance.Int("4")], None)),
+  )
+  |> analysis.infer(empty_module_internals("foo", "bar"))
+  |> should.equal(
+    Ok(
+      analysis.Call(non_empty_list, [
+        analysis.Int("1"),
+        analysis.Call(non_empty_list, [
+          analysis.Int("2"),
+          analysis.Call(non_empty_list, [
+            analysis.Int("3"),
+            analysis.Call(non_empty_list, [
+              analysis.Int("4"),
+              analysis.Call(empty_list, []),
+            ]),
+          ]),
+        ]),
+      ]),
+    ),
+  )
+}
+
+pub fn pipe_operator_to_call_test() {
   let assert Ok(#(context, expr)) =
     glance.BinaryOperator(
       glance.Pipe,
@@ -921,3 +957,40 @@ pub fn pipe_operator_test() {
     ]),
   )
 }
+
+pub fn pipe_operator_to_var_test() {
+  let assert Ok(#(context, expr)) =
+    glance.BinaryOperator(
+      glance.Pipe,
+      glance.Variable("lst"),
+      glance.Variable("fun"),
+    )
+    |> analysis.init_inference(
+      analysis.TypeVariable("$1"),
+      dict.from_list([
+        #("lst", analysis.TypeVariable("a")),
+        #("fun", analysis.TypeVariable("b")),
+      ]),
+      analysis.Context(empty_module_internals("foo", "bar"), dict.new(), [], 2),
+    )
+
+  context.constraints
+  |> should.equal([
+    analysis.Equal(analysis.TypeVariable("$2"), analysis.TypeVariable("a")),
+    analysis.Equal(
+      analysis.FunctionType(
+        [analysis.TypeVariable("$2")],
+        analysis.TypeVariable("$1"),
+      ),
+      analysis.TypeVariable("b"),
+    ),
+  ])
+
+  expr
+  |> should.equal(
+    analysis.Call(analysis.Variable(analysis.TypeVariable("b"), "fun"), [
+      analysis.Variable(analysis.TypeVariable("a"), "lst"),
+    ]),
+  )
+}
+// TODO: pipe to FnCapture, pipe to Fn

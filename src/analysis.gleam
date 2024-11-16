@@ -47,8 +47,8 @@ pub type TypeId {
 pub type BuiltInFunction {
   TupleConstructor(Int)
   //IndexTuple
-  //EmptyListConstructor
-  //NonEmptyListConstructor
+  EmptyListConstructor
+  NonEmptyListConstructor
   AccessField(String)
   NegateInt
   NegateBool
@@ -372,6 +372,22 @@ fn init_inference_call_builtin(
         expected_type,
       )
     }
+    EmptyListConstructor -> {
+      let #(context, item_type) = fresh_type_variable(context)
+      #(
+        add_constraint(context, Equal(expected_type, list_type(item_type))),
+        [],
+        expected_type,
+      )
+    }
+    NonEmptyListConstructor -> {
+      let #(context, item_type) = fresh_type_variable(context)
+      #(
+        add_constraint(context, Equal(expected_type, list_type(item_type))),
+        [item_type, list_type(item_type)],
+        expected_type,
+      )
+    }
   }
   let function_type = FunctionType(arg_types, return_type)
   let function =
@@ -477,7 +493,30 @@ pub fn init_inference(
         context,
       )
     }
-    glance.List(_, _) -> todo
+    glance.List(items, rest) -> {
+      case items, rest {
+        [], None ->
+          init_inference_call_builtin(
+            EmptyListConstructor,
+            [],
+            expected_type,
+            environment,
+            context,
+          )
+        [], Some(tail_expr) -> {
+          let #(context, item_type) = fresh_type_variable(context)
+          init_inference(tail_expr, list_type(item_type), environment, context)
+        }
+        [item, ..more], _ ->
+          init_inference_call_builtin(
+            NonEmptyListConstructor,
+            [item, glance.List(more, rest)],
+            expected_type,
+            environment,
+            context,
+          )
+      }
+    }
     glance.Fn(args, return, body) -> {
       use #(context, return_type) <- result.try(resolve_optional_type(
         context,
@@ -574,6 +613,14 @@ pub fn init_inference(
             environment,
             context,
           )
+        glance.Variable(_) ->
+          init_inference(
+            glance.Call(right, [glance.Field(None, left)]),
+            expected_type,
+            environment,
+            context,
+          )
+        glance.Fn(args, return_annotation, body) -> todo
         _ -> todo
       }
     glance.BinaryOperator(operator, left, right) -> {
