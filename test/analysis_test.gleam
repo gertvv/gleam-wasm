@@ -835,6 +835,13 @@ pub fn type_infer_field_access_test() {
         analysis.Field(Some("b"), analysis.float_type),
       ]),
     ])
+  let var_b_constructor_type =
+    analysis.FunctionType([analysis.int_type, analysis.float_type], my_type)
+  let access_field_a =
+    analysis.FunctionReference(
+      analysis.FunctionType([my_type], analysis.int_type),
+      analysis.BuiltInFunction(analysis.AccessField(None, analysis.ByLabel("a"))),
+    )
   let internals =
     analysis.ModuleInternals(
       project: project.Project("name", dict.new(), fn(_, _) { panic }),
@@ -844,13 +851,7 @@ pub fn type_infer_field_access_test() {
       custom_types: dict.from_list([#("MyType", my_type_definition)]),
       functions: dict.from_list([
         #("VariantA", analysis.FunctionType([analysis.int_type], my_type)),
-        #(
-          "VariantB",
-          analysis.FunctionType(
-            [analysis.int_type, analysis.float_type],
-            my_type,
-          ),
-        ),
+        #("VariantB", var_b_constructor_type),
       ]),
     )
   glance.FieldAccess(
@@ -862,20 +863,71 @@ pub fn type_infer_field_access_test() {
   |> analysis.infer(internals)
   |> should.equal(
     Ok(
-      analysis.Call(
-        analysis.FunctionReference(
-          analysis.FunctionType([my_type], analysis.int_type),
-          analysis.BuiltInFunction(analysis.AccessField("a")),
-        ),
-        [
-          analysis.Call(
-            analysis.FunctionReference(
-              analysis.FunctionType([analysis.int_type], my_type),
-              analysis.FunctionFromModule(module_id, "VariantA"),
-            ),
-            [analysis.Int("42")],
+      analysis.Call(access_field_a, [
+        analysis.Call(
+          analysis.FunctionReference(
+            analysis.FunctionType([analysis.int_type], my_type),
+            analysis.FunctionFromModule(module_id, "VariantA"),
           ),
-        ],
+          [analysis.Int("42")],
+        ),
+      ]),
+    ),
+  )
+
+  // redefining the field access here to use the variant-specific version
+  // TODO: consider changing to always generate the general accessor when possible
+  let access_field_a =
+    analysis.FunctionReference(
+      analysis.FunctionType([my_type], analysis.int_type),
+      analysis.BuiltInFunction(analysis.AccessField(
+        Some("VariantB"),
+        analysis.ByLabel("a"),
+      )),
+    )
+  let variant_b_constructor =
+    analysis.FunctionReference(
+      var_b_constructor_type,
+      analysis.FunctionFromModule(module_id, "VariantB"),
+    )
+  glance.Block([
+    glance.Assignment(
+      glance.Let,
+      glance.PatternVariable("record"),
+      None,
+      glance.Call(glance.Variable("VariantB"), [
+        glance.Field(None, glance.Int("42")),
+        glance.Field(None, glance.Float("3.14")),
+      ]),
+    ),
+    glance.Expression(
+      glance.RecordUpdate(None, "VariantB", glance.Variable("record"), [
+        #("b", glance.Float("2.71")),
+      ]),
+    ),
+  ])
+  |> analysis.infer(internals)
+  |> should.equal(
+    Ok(
+      analysis.Call(
+        analysis.Fn(analysis.FunctionType([], my_type), [], [
+          analysis.Assignment(
+            "record",
+            analysis.Call(variant_b_constructor, [
+              analysis.Int("42"),
+              analysis.Float("3.14"),
+            ]),
+          ),
+          analysis.Expression(
+            analysis.Call(variant_b_constructor, [
+              analysis.Call(access_field_a, [
+                analysis.Variable(my_type, "record"),
+              ]),
+              analysis.Float("2.71"),
+            ]),
+          ),
+        ]),
+        [],
       ),
     ),
   )

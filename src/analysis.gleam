@@ -44,12 +44,17 @@ pub type TypeId {
   TypeFromModule(module: ModuleId, name: String)
 }
 
+pub type FieldIndex {
+  ByLabel(String)
+  ByPosition(Int)
+}
+
 pub type BuiltInFunction {
   TupleConstructor(Int)
   //IndexTuple
   EmptyListConstructor
   NonEmptyListConstructor
-  AccessField(String)
+  AccessField(variant: Option(String), field: FieldIndex)
   NegateInt
   NegateBool
   BinaryOperator(glance.BinaryOperator)
@@ -154,7 +159,7 @@ pub type Statement {
 
 pub type Constraint {
   Equal(a: Type, b: Type)
-  HasFieldOfType(container: Type, name: String, field: Type)
+  HasFieldOfType(container_type: Type, field: FieldIndex, field_type: Type)
 }
 
 pub type Context {
@@ -361,12 +366,12 @@ fn init_inference_call_builtin(
         })
       #(context, types, TypeConstructor(BuiltInType(TupleType(arity)), types))
     }
-    AccessField(name) -> {
+    AccessField(_, index) -> {
       let #(context, custom_type) = fresh_type_variable(context)
       #(
         add_constraint(
           context,
-          HasFieldOfType(custom_type, name, expected_type),
+          HasFieldOfType(custom_type, index, expected_type),
         ),
         [custom_type],
         expected_type,
@@ -551,7 +556,96 @@ pub fn init_inference(
         Fn(fn_type, list.map(args, fn(arg) { arg.name }), body),
       )
     }
-    glance.RecordUpdate(_, _, _, _) -> todo
+    glance.RecordUpdate(maybe_module, constructor, record, fields) -> {
+      // get the constructors and custom types for the module
+      use #(functions, custom_types) <- result.try(
+        case maybe_module {
+          Some(module_name) -> {
+            dict.get(context.internals.imports, module_name)
+            |> result.map(fn(module) {
+              #(module.functions, module.custom_types)
+            })
+          }
+          None ->
+            Ok(#(context.internals.functions, context.internals.custom_types))
+        }
+        |> result.map_error(fn(_) { compiler.AnotherTypeError }),
+      )
+      // identify the custom type and variant used
+      use #(module_id, custom_type, variant) <- result.try(case
+        dict.get(functions, constructor)
+      {
+        Ok(FunctionType(
+          _params,
+          TypeConstructor(TypeFromModule(module_id, type_name), _) as return_type,
+        )) -> {
+          dict.get(custom_types, type_name)
+          |> result.try(fn(custom_type) {
+            list.find(custom_type.variants, fn(variant) {
+              variant.name == constructor
+            })
+            |> result.map(fn(variant) { #(module_id, return_type, variant) })
+          })
+          |> result.map_error(fn(_) { compiler.AnotherTypeError })
+        }
+        _ -> Error(compiler.AnotherTypeError)
+      })
+      // TODO: check all fields that are attempted to be set, exist
+      // TODO: check that the variant has any record fields
+      //
+      // map variant fields to either how they are set in the record update, or their existing value
+      use #(context, args) <- result.try(
+        list.index_map(variant.fields, fn(field, index) { #(index, field) })
+        |> list.try_fold(from: #(context, []), with: fn(acc, pair) {
+          let #(context, exprs) = acc
+          let #(index, field) = pair
+          case field {
+            Field(Some(label), field_type) ->
+              case list.find(fields, fn(pair) { pair.0 == label }) {
+                Ok(#(_, expr)) ->
+                  init_inference(expr, field_type, environment, context)
+                Error(Nil) ->
+                  // TODO: generate None for common fields?
+                  init_inference_call_builtin(
+                    AccessField(Some(variant.name), ByLabel(label)),
+                    [record],
+                    field_type,
+                    environment,
+                    context,
+                  )
+              }
+            Field(None, field_type) ->
+              init_inference_call_builtin(
+                AccessField(Some(variant.name), ByPosition(index)),
+                [record],
+                field_type,
+                environment,
+                context,
+              )
+          }
+          |> result.map(fn(res) {
+            let #(context, expr) = res
+            #(context, [expr, ..exprs])
+          })
+        }),
+      )
+      let args = list.reverse(args)
+      // now call the constructor
+      dict.get(functions, variant.name)
+      |> result.map_error(fn(_) { compiler.AnotherTypeError })
+      |> result.map(fn(constructor_type) {
+        #(
+          add_constraint(context, Equal(expected_type, custom_type)),
+          Call(
+            FunctionReference(
+              constructor_type,
+              FunctionFromModule(module_id, variant.name),
+            ),
+            args,
+          ),
+        )
+      })
+    }
     glance.FieldAccess(container, label) -> {
       // short-cut module field access if possible
       case container {
@@ -576,7 +670,7 @@ pub fn init_inference(
       |> result.map_error(fn(_) { compiler.AnotherTypeError })
       |> result.lazy_or(fn() {
         init_inference_call_builtin(
-          AccessField(label),
+          AccessField(None, ByLabel(label)),
           [container],
           expected_type,
           environment,
@@ -639,7 +733,13 @@ pub fn get_sub(context: Context, t: Type) -> Option(Type) {
   case t {
     TypeVariable(i) ->
       dict.get(context.substitution, i)
-      |> result.map(Some)
+      |> result.map(fn(r) {
+        // TODO: worry about infinite recursion?
+        case r {
+          TypeVariable(j) if i != j -> get_sub(context, r)
+          _ -> Some(r)
+        }
+      })
       |> result.unwrap(None)
     _ -> None
   }
@@ -713,7 +813,7 @@ pub fn solve_constraints(
   |> list.try_fold(from: context, with: fn(context, constraint) {
     case constraint {
       Equal(a, b) -> unify(context, a, b)
-      HasFieldOfType(container_type, field_name, field_type) -> {
+      HasFieldOfType(container_type, ByLabel(field_name), field_type) -> {
         use #(module_id, type_name) <- result.try(case container_type {
           TypeConstructor(TypeFromModule(module_id, type_name), _params) ->
             Ok(#(module_id, type_name))
@@ -726,7 +826,12 @@ pub fn solve_constraints(
                 TypeFromModule(module_id, type_name),
                 _params,
               )) -> Ok(#(module_id, type_name))
-              Some(_) -> Error(compiler.AnotherTypeError)
+              Some(thing) -> {
+                io.debug("Got some unexpected container type")
+                io.debug(thing)
+                pprint.debug(context.constraints)
+                Error(compiler.AnotherTypeError)
+              }
             }
         })
         // TODO: function for looking up custom types
@@ -773,6 +878,7 @@ pub fn solve_constraints(
         })
         |> result.try(unify(context, _, field_type))
       }
+      HasFieldOfType(_, ByPosition(_), _) -> todo
     }
   })
   |> result.map(fn(context) { context.substitution })
