@@ -51,7 +51,6 @@ pub type FieldIndex {
 
 pub type BuiltInFunction {
   TupleConstructor(Int)
-  //IndexTuple
   EmptyListConstructor
   NonEmptyListConstructor
   AccessField(variant: Option(String), field: FieldIndex)
@@ -367,13 +366,13 @@ fn init_inference_call_builtin(
       #(context, types, TypeConstructor(BuiltInType(TupleType(arity)), types))
     }
     AccessField(_, index) -> {
-      let #(context, custom_type) = fresh_type_variable(context)
+      let #(context, container_type) = fresh_type_variable(context)
       #(
         add_constraint(
           context,
-          HasFieldOfType(custom_type, index, expected_type),
+          HasFieldOfType(container_type, index, expected_type),
         ),
-        [custom_type],
+        [container_type],
         expected_type,
       )
     }
@@ -694,8 +693,41 @@ pub fn init_inference(
       ))
       init_inference_call(function, arg_types, args, environment, context)
     }
-    glance.TupleIndex(_, _) -> todo
-    glance.FnCapture(_, _, _, _) -> todo
+    glance.TupleIndex(tuple, index) -> {
+      init_inference_call_builtin(
+        AccessField(None, ByPosition(index)),
+        [tuple],
+        expected_type,
+        environment,
+        context,
+      )
+    }
+    glance.FnCapture(_label, function, args_before, args_after) -> {
+      // TODO: proper arg name
+      let arg_name = "?"
+      let #(context, arg_type) = fresh_type_variable(context)
+      let #(context, return_type) = fresh_type_variable(context)
+      init_inference(
+        glance.Call(
+          function,
+          list.append(args_before, [
+            glance.Field(None, glance.Variable(arg_name)),
+            ..args_after
+          ]),
+        ),
+        return_type,
+        dict.insert(environment, arg_name, arg_type),
+        context,
+      )
+      |> result.map(fn(res) {
+        let #(context, expr) = res
+        let fn_type = FunctionType([arg_type], return_type)
+        #(
+          add_constraint(context, Equal(expected_type, fn_type)),
+          Fn(expected_type, [glance.Named(arg_name)], [Expression(expr)]),
+        )
+      })
+    }
     glance.BitString(_) -> todo
     glance.Case(_, _) -> todo
     glance.BinaryOperator(glance.Pipe, left, right) ->
@@ -707,15 +739,13 @@ pub fn init_inference(
             environment,
             context,
           )
-        glance.Variable(_) ->
+        _ ->
           init_inference(
             glance.Call(right, [glance.Field(None, left)]),
             expected_type,
             environment,
             context,
           )
-        glance.Fn(args, return_annotation, body) -> todo
-        _ -> todo
       }
     glance.BinaryOperator(operator, left, right) -> {
       init_inference_call_builtin(
@@ -878,7 +908,25 @@ pub fn solve_constraints(
         })
         |> result.try(unify(context, _, field_type))
       }
-      HasFieldOfType(_, ByPosition(_), _) -> todo
+      HasFieldOfType(container_type, ByPosition(i), field_type) -> {
+        use tuple_params <- result.try(case container_type {
+          FunctionType(_, _) -> Error(compiler.AnotherTypeError)
+          TypeConstructor(BuiltInType(TupleType(_n)), params) -> Ok(params)
+          TypeConstructor(_, _) -> Error(compiler.AnotherTypeError)
+          TypeVariable(_) ->
+            case get_sub(context, container_type) {
+              None -> Error(compiler.AnotherTypeError)
+              Some(TypeConstructor(BuiltInType(TupleType(_n)), params)) ->
+                Ok(params)
+              Some(_) -> Error(compiler.AnotherTypeError)
+            }
+        })
+        list.split(tuple_params, i)
+        |> pair.second
+        |> list.first
+        |> result.map_error(fn(_) { compiler.AnotherTypeError })
+        |> result.try(unify(context, _, field_type))
+      }
     }
   })
   |> result.map(fn(context) { context.substitution })
@@ -1103,8 +1151,11 @@ pub fn resolve_type(
           }
       }
     }
-    glance.TupleType(_) -> {
-      todo
+    glance.TupleType(elems) -> {
+      list.try_map(elems, resolve_type(data, _))
+      |> result.map(fn(elem_types) {
+        TypeConstructor(BuiltInType(TupleType(list.length(elems))), elem_types)
+      })
     }
     glance.FunctionType(function_parameters, return) -> {
       let resolved_parameters =

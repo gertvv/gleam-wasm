@@ -821,6 +821,41 @@ pub fn type_infer_tuple_test() {
   )
 }
 
+pub fn type_infer_tuple_index_test() {
+  let my_tuple_type =
+    analysis.TypeConstructor(analysis.BuiltInType(analysis.TupleType(2)), [
+      analysis.int_type,
+      analysis.float_type,
+    ])
+  glance.TupleIndex(glance.Tuple([glance.Int("42"), glance.Float("3.14")]), 1)
+  |> analysis.infer(empty_module_internals("foo", "bar"))
+  |> should.equal(
+    Ok(
+      analysis.Call(
+        analysis.FunctionReference(
+          analysis.FunctionType([my_tuple_type], analysis.float_type),
+          analysis.BuiltInFunction(analysis.AccessField(
+            None,
+            analysis.ByPosition(1),
+          )),
+        ),
+        [
+          analysis.Call(
+            analysis.FunctionReference(
+              analysis.FunctionType(
+                [analysis.int_type, analysis.float_type],
+                my_tuple_type,
+              ),
+              analysis.BuiltInFunction(analysis.TupleConstructor(2)),
+            ),
+            [analysis.Int("42"), analysis.Float("3.14")],
+          ),
+        ],
+      ),
+    ),
+  )
+}
+
 pub fn type_infer_field_access_test() {
   let module_id = project.SourceLocation("foo", "bar")
   let my_type =
@@ -1045,4 +1080,66 @@ pub fn pipe_operator_to_var_test() {
     ]),
   )
 }
-// TODO: pipe to FnCapture, pipe to Fn
+
+pub fn fn_capture_test() {
+  let assert Ok(#(context, expr)) =
+    glance.FnCapture(
+      None,
+      glance.Variable("fun"),
+      [glance.Field(None, glance.Variable("x"))],
+      [glance.Field(None, glance.Variable("y"))],
+    )
+    |> analysis.init_inference(
+      analysis.TypeVariable("$1"),
+      dict.from_list([
+        #("fun", analysis.TypeVariable("a")),
+        #("x", analysis.int_type),
+        #("y", analysis.int_type),
+      ]),
+      analysis.Context(empty_module_internals("foo", "bar"), dict.new(), [], 2),
+    )
+
+  expr
+  |> should.equal(
+    analysis.Fn(analysis.TypeVariable("$1"), [glance.Named("?")], [
+      analysis.Expression(
+        analysis.Call(analysis.Variable(analysis.TypeVariable("a"), "fun"), [
+          analysis.Variable(analysis.int_type, "x"),
+          analysis.Variable(analysis.TypeVariable("$2"), "?"),
+          analysis.Variable(analysis.int_type, "y"),
+        ]),
+      ),
+    ]),
+  )
+
+  context.constraints
+  |> should.equal([
+    analysis.Equal(
+      analysis.TypeVariable("$1"),
+      analysis.FunctionType(
+        [analysis.TypeVariable("$2")],
+        analysis.TypeVariable("$3"),
+      ),
+    ),
+    analysis.Equal(
+      analysis.TypeVariable("$6"),
+      analysis.TypeConstructor(analysis.BuiltInType(analysis.IntType), []),
+    ),
+    analysis.Equal(analysis.TypeVariable("$5"), analysis.TypeVariable("$2")),
+    analysis.Equal(
+      analysis.TypeVariable("$4"),
+      analysis.TypeConstructor(analysis.BuiltInType(analysis.IntType), []),
+    ),
+    analysis.Equal(
+      analysis.FunctionType(
+        [
+          analysis.TypeVariable("$4"),
+          analysis.TypeVariable("$5"),
+          analysis.TypeVariable("$6"),
+        ],
+        analysis.TypeVariable("$3"),
+      ),
+      analysis.TypeVariable("a"),
+    ),
+  ])
+}
