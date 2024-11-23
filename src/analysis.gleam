@@ -14,18 +14,9 @@ import pprint
 import project.{type ModuleId, type Project}
 
 // TODO: next steps?
-// - reduce number of expression-types by adding a FunctionId and BuiltInFunction
-//    - Tuple constructors
-//    - Tuple indexing
-//    - List constructors
-//    - List patterns
-//    - Field access
-//    - Unary and binary operators
-//    - Bool constructors?
 // - complete inference for all expression types
-// - constructors for lists: Empty, NonEmpty & results: Ok, Error
+// - constructors for results: Ok, Error
 // - pattern matching
-// - add constructors to a module's functions
 // - inference for mutually recursive functions? call graph analysis?
 // - constants
 
@@ -137,15 +128,12 @@ pub type Expression {
   String(val: String)
   Variable(typ: Type, name: String)
   Trap(typ: Type, kind: TrapKind, detail: Option(Expression))
-  // TODO: maybe should have FunctionId type and a BuiltInFunction constructor to grab built-in stuff as functions?
   FunctionReference(typ: Type, id: FunctionId)
   Fn(
     typ: Type,
     argument_names: List(glance.AssignmentName),
     body: List(Statement),
   )
-  // TODO: represent as Call of a built-in function?
-  FieldAccess(typ: Type, container: Expression, label: String)
   // TODO: consider storing a Type on Call otherwise it may be a pain
   Call(function: Expression, arguments: List(Expression))
 }
@@ -990,7 +978,6 @@ pub fn substitute_expression(
         substitute_expression(function, subs),
         list.map(args, substitute_expression(_, subs)),
       )
-    FieldAccess(_, _, _) -> todo
     FunctionReference(t, id) -> FunctionReference(substitute(t, subs), id)
     Trap(t, kind, maybe_expr) ->
       Trap(
