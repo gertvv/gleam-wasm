@@ -790,7 +790,11 @@ pub fn type_infer_block_test() {
     Ok(
       analysis.Call(
         analysis.Fn(analysis.FunctionType([], analysis.int_type), [], [
-          analysis.Assignment("x", analysis.Int("42")),
+          analysis.Assignment(
+            glance.Let,
+            analysis.PatternVariable("x"),
+            analysis.Int("42"),
+          ),
           analysis.Expression(analysis.Variable(analysis.int_type, "x")),
         ]),
         [],
@@ -854,6 +858,53 @@ pub fn type_infer_tuple_index_test() {
       ),
     ),
   )
+}
+
+pub fn type_infer_let_pattern_test() {
+  glance.Block([
+    glance.Assignment(
+      kind: glance.Let,
+      pattern: glance.PatternTuple([
+        glance.PatternDiscard(""),
+        glance.PatternVariable("y"),
+      ]),
+      annotation: option.None,
+      value: glance.Tuple([glance.Int("42"), glance.Float("3.14")]),
+    ),
+    glance.Expression(glance.Variable("y")),
+  ])
+  |> analysis.infer(empty_module_internals("foo", "bar"))
+  |> should.equal(
+    Ok(
+      analysis.Call(
+        analysis.Fn(analysis.FunctionType([], analysis.float_type), [], [
+          analysis.Assignment(
+            glance.Let,
+            analysis.PatternTuple([
+              analysis.PatternDiscard(""),
+              analysis.PatternVariable("y"),
+            ]),
+            analysis.Call(
+              analysis.FunctionReference(
+                analysis.FunctionType(
+                  [analysis.int_type, analysis.float_type],
+                  analysis.TypeConstructor(
+                    analysis.BuiltInType(analysis.TupleType(2)),
+                    [analysis.int_type, analysis.float_type],
+                  ),
+                ),
+                analysis.BuiltInFunction(analysis.TupleConstructor(2)),
+              ),
+              [analysis.Int("42"), analysis.Float("3.14")],
+            ),
+          ),
+          analysis.Expression(analysis.Variable(analysis.float_type, "y")),
+        ]),
+        [],
+      ),
+    ),
+  )
+  // TODO: let assert scenario with Result
 }
 
 pub fn type_infer_field_access_test() {
@@ -947,7 +998,8 @@ pub fn type_infer_field_access_test() {
       analysis.Call(
         analysis.Fn(analysis.FunctionType([], my_type), [], [
           analysis.Assignment(
-            "record",
+            glance.Let,
+            analysis.PatternVariable("record"),
             analysis.Call(variant_b_constructor, [
               analysis.Int("42"),
               analysis.Float("3.14"),
