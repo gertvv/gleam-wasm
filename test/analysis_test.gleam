@@ -25,6 +25,60 @@ fn empty_module_internals(package_name, module_path) {
   )
 }
 
+pub fn pair_args_test() {
+  let at = compiler.AtExpression(glance.String("boo"))
+  let named = fn(str, val) { analysis.Field(Some(str), val) }
+  let positional = fn(val) { analysis.Field(None, val) }
+
+  // More actual than expected should error
+  analysis.pair_args(
+    expected: [positional("a")],
+    actual: [positional("b"), positional("c")],
+    at:,
+  )
+  |> should.equal(Error(compiler.ArityError(at, 1, 2)))
+
+  // Fewer actual than expected returns None
+  analysis.pair_args(
+    expected: [positional("a"), positional("b")],
+    actual: [positional("c")],
+    at:,
+  )
+  |> should.equal(Ok([#("a", Some("c")), #("b", None)]))
+
+  // Labeled args may be provided as positional
+  analysis.pair_args(
+    expected: [named("a", "a"), named("b", "b")],
+    actual: [positional("c"), positional("d")],
+    at:,
+  )
+  |> should.equal(Ok([#("a", Some("c")), #("b", Some("d"))]))
+
+  // Positional args after labeled not allowed
+  analysis.pair_args(
+    expected: [named("a", "a"), named("b", "b")],
+    actual: [named("a", "c"), positional("d")],
+    at:,
+  )
+  |> should.equal(Error(compiler.PositionalArgsAfterLabeledArgsError(at)))
+
+  // Unexpected labeled args not allowed
+  analysis.pair_args(
+    expected: [named("a", "a"), named("b", "b")],
+    actual: [named("c", "c")],
+    at:,
+  )
+  |> should.equal(Error(compiler.NoSuchFieldError(at, "c")))
+
+  // Labeled args should get paired
+  analysis.pair_args(
+    expected: [named("a", "a"), named("b", "b")],
+    actual: [named("b", "c"), named("a", "d")],
+    at:,
+  )
+  |> should.equal(Ok([#("a", Some("d")), #("b", Some("c"))]))
+}
+
 pub fn resolve_basic_types_test() {
   analysis.resolve_type(
     empty_module_internals("foo", "bar"),
@@ -905,6 +959,10 @@ pub fn type_infer_let_pattern_test() {
     ),
   )
   // TODO: let assert scenario with Result
+}
+
+pub fn type_infer_constructor_pattern_test() {
+  todo
 }
 
 pub fn type_infer_field_access_test() {

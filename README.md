@@ -24,6 +24,13 @@ wasm-as --enable-gc --enable-reference-types --enable-tail-call generated.wat
 node index.mjs
 ```
 
+Disassembling
+---
+
+```
+wasm-dis --all-features generated.wasm -o generated.reversed.wat
+```
+
 See also
 ---
 

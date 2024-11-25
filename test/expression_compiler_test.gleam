@@ -166,7 +166,7 @@ pub fn compile_add_variables_test() {
   )
   |> should.equal(
     Error(compiler.TypeError(
-      glance.Variable("c"),
+      compiler.AtExpression(glance.Variable("c")),
       compiler.int_type,
       compiler.float_type,
     )),
@@ -236,7 +236,7 @@ pub fn compile_function_call_simple_test() {
   )
   |> should.equal(
     Error(compiler.TypeError(
-      glance.Float("3.14"),
+      compiler.AtExpression(glance.Float("3.14")),
       compiler.int_type,
       compiler.float_type,
     )),
@@ -246,7 +246,11 @@ pub fn compile_function_call_simple_test() {
     local_state,
     False,
   )
-  |> should.equal(Error(compiler.NotAFunctionError(glance.Variable("i"))))
+  |> should.equal(
+    Error(
+      compiler.NotAFunctionError(compiler.AtExpression(glance.Variable("i"))),
+    ),
+  )
   compile_expression(
     glance.Call(glance.Variable("j"), [glance.Field(None, glance.Float("3.14"))]),
     local_state,
@@ -261,7 +265,13 @@ pub fn compile_function_call_simple_test() {
     local_state,
     False,
   )
-  |> should.equal(Error(compiler.ArityError(glance.Variable("fn1"), 1, 2)))
+  |> should.equal(
+    Error(compiler.ArityError(
+      compiler.AtExpression(glance.Variable("fn1")),
+      1,
+      2,
+    )),
+  )
 }
 
 pub fn compile_function_call_generic_test() {
@@ -621,7 +631,7 @@ pub fn compile_case_test() {
   )
   |> should.equal(
     Error(compiler.TypeError(
-      glance.Int("0"),
+      compiler.AtExpression(glance.Int("0")),
       compiler.float_type,
       compiler.int_type,
     )),

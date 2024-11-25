@@ -10,6 +10,12 @@ import wat.{
   type WatDefinition, type WatExpression, type WatFunctionType, type WatType,
 }
 
+pub type ErrorLocation {
+  AtExpression(Expression)
+  AtStatement(glance.Statement)
+  AtPattern(glance.Pattern)
+}
+
 pub type CompilerError {
   FileError(error: FileError)
   PackageTomlError(error: gloml.DecodeError)
@@ -17,9 +23,11 @@ pub type CompilerError {
   ParseError(error: glance.Error)
   SyntaxError(error: String)
   ReferenceError(name: String)
-  TypeError(expression: Expression, expected_type: Type, actual_type: Type)
-  NotAFunctionError(expression: Expression)
-  ArityError(expression: Expression, expected_number: Int, actual_number: Int)
+  TypeError(at: ErrorLocation, expected_type: Type, actual_type: Type)
+  NotAFunctionError(at: ErrorLocation)
+  ArityError(at: ErrorLocation, expected_number: Int, actual_number: Int)
+  PositionalArgsAfterLabeledArgsError(at: ErrorLocation)
+  NoSuchFieldError(at: ErrorLocation, field: String)
   TypeArityError(type_: Type, expected_number: Int, actual_number: Int)
   AnotherTypeError
 }

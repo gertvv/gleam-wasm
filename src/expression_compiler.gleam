@@ -327,7 +327,12 @@ fn match_type(
   let check = fn(expected_type: Type) {
     case act_type == expected_type {
       True -> Ok(mapping)
-      False -> Error(compiler.TypeError(expr, expected_type, act_type))
+      False ->
+        Error(compiler.TypeError(
+          compiler.AtExpression(expr),
+          expected_type,
+          act_type,
+        ))
     }
   }
   case exp_type {
@@ -343,7 +348,12 @@ fn match_type(
         -> {
           case list.length(act_params) == list.length(exp_params) {
             True -> Ok(list.map2(exp_params, act_params, fn(e, a) { #(e, a) }))
-            False -> Error(compiler.TypeError(expr, exp_type, act_type))
+            False ->
+              Error(compiler.TypeError(
+                compiler.AtExpression(expr),
+                exp_type,
+                act_type,
+              ))
           }
           |> result.try(list.try_fold(
             _,
@@ -353,7 +363,12 @@ fn match_type(
             },
           ))
         }
-        _ -> Error(compiler.TypeError(expr, exp_type, act_type))
+        _ ->
+          Error(compiler.TypeError(
+            compiler.AtExpression(expr),
+            exp_type,
+            act_type,
+          ))
       }
     }
     glance.FunctionType(exp_params, exp_return) -> {
@@ -368,7 +383,12 @@ fn match_type(
                   fn(e, a) { #(e, a) },
                 ),
               )
-            False -> Error(compiler.TypeError(expr, exp_type, act_type))
+            False ->
+              Error(compiler.TypeError(
+                compiler.AtExpression(expr),
+                exp_type,
+                act_type,
+              ))
           }
           |> result.try(list.try_fold(
             _,
@@ -378,10 +398,16 @@ fn match_type(
             },
           ))
         }
-        _ -> Error(compiler.TypeError(expr, exp_type, act_type))
+        _ ->
+          Error(compiler.TypeError(
+            compiler.AtExpression(expr),
+            exp_type,
+            act_type,
+          ))
       }
     }
-    _ -> Error(compiler.TypeError(expr, exp_type, act_type))
+    _ ->
+      Error(compiler.TypeError(compiler.AtExpression(expr), exp_type, act_type))
   }
 }
 
@@ -571,7 +597,11 @@ fn compile_clause(
             )
           })
           |> result.map_error(fn(_) {
-            compiler.TypeError(body, previous_state.type_, expr.type_)
+            compiler.TypeError(
+              compiler.AtExpression(body),
+              previous_state.type_,
+              expr.type_,
+            )
           })
         }),
       )
@@ -674,7 +704,12 @@ pub fn compile_expression(
                 )
               Ok(#(call_closure(name, signature, _), type_))
             }
-            _ -> Error(compiler.NotAFunctionError(glance.Variable(name)))
+            _ ->
+              Error(
+                compiler.NotAFunctionError(
+                  compiler.AtExpression(glance.Variable(name)),
+                ),
+              )
           }
         _, Ok(type_) -> Ok(#(fn(params) { wat.Call(name, params) }, type_))
         _, _ -> Error(compiler.ReferenceError(name))
@@ -794,7 +829,7 @@ fn compile_function_call(
       })
     False ->
       Error(compiler.ArityError(
-        glance.Variable(name),
+        compiler.AtExpression(glance.Variable(name)),
         list.length(params),
         list.length(args),
       ))

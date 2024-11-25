@@ -1,5 +1,6 @@
 import compiler.{type CompilerError}
 import glance
+import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/io
@@ -138,6 +139,7 @@ pub type Expression {
   Call(function: Expression, arguments: List(Expression))
 }
 
+/// Patterns used in assignments and case expressions
 pub type Pattern {
   PatternInt(value: String)
   PatternFloat(value: String)
@@ -149,7 +151,12 @@ pub type Pattern {
   PatternAssignment(pattern: Pattern, name: String)
   // PatternConcatenate
   // PatternBitString
-  // PatternConstructor
+  /// Variant constructor. Normalized to use positional arguments. Any unspecified fields are represented by `PatternDiscard("")`.
+  PatternConstructor(
+    custom_type: TypeId,
+    variant: Variant,
+    arguments: List(Pattern),
+  )
 }
 
 pub type Statement {
@@ -259,6 +266,68 @@ pub fn init_inference_block(
   |> result.map(pair.map_second(_, list.reverse))
 }
 
+fn is_positional_arg(arg: Field(a)) -> Bool {
+  option.is_none(arg.label)
+}
+
+fn field_label(field: Field(a)) -> Option(String) {
+  field.label
+}
+
+// TODO: find all the places this should be used!
+pub fn pair_args(
+  expected params: List(Field(a)),
+  actual args: List(Field(b)),
+  at location: compiler.ErrorLocation,
+) -> Result(List(#(a, Option(b))), CompilerError) {
+  // Number of arguments provided may not exceed the expected
+  use <- bool.guard(
+    list.length(params) < list.length(args),
+    Error(compiler.ArityError(location, list.length(params), list.length(args))),
+  )
+  let #(pos_args, label_args) = list.split_while(args, is_positional_arg)
+  // Positional arguments are not allowed after labeled arguments
+  use <- bool.guard(
+    list.any(label_args, is_positional_arg),
+    Error(compiler.PositionalArgsAfterLabeledArgsError(location)),
+  )
+  let #(pos_params, label_params) = list.split(params, list.length(pos_args))
+  // TODO: check labeled arguments are unique
+  //
+  // Actual labeled arguments must be expected
+  let unexpected_arg =
+    set.difference(
+      list.map(label_args, field_label) |> set.from_list,
+      list.map(label_params, field_label) |> set.from_list,
+    )
+    |> set.to_list
+    |> list.first
+  use _ <- result.try(case unexpected_arg {
+    Ok(Some(arg)) -> Error(compiler.NoSuchFieldError(location, arg))
+    Ok(None) -> Error(compiler.NoSuchFieldError(location, ""))
+    Error(Nil) -> Ok(Nil)
+  })
+  // Find value provided for labeled arguments (if provided)
+  let label_pairs =
+    list.map(label_params, fn(param) {
+      case list.find(label_args, fn(arg) { arg.label == param.label }) {
+        Ok(arg) -> #(param, Some(arg))
+        Error(Nil) -> #(param, None)
+      }
+    })
+  // Pair up positional arguments
+  let pos_pairs = list.zip(pos_params, pos_args |> list.map(Some))
+  // Map all pairs to result format 
+  list.append(pos_pairs, label_pairs)
+  |> list.map(fn(pair) {
+    case pair {
+      #(Field(item: a, ..), Some(Field(item: b, ..))) -> #(a, Some(b))
+      #(Field(item: a, ..), None) -> #(a, None)
+    }
+  })
+  |> Ok
+}
+
 pub fn init_inference_pattern(
   pattern: glance.Pattern,
   expected_type: Type,
@@ -339,7 +408,76 @@ pub fn init_inference_pattern(
     }
     glance.PatternConcatenate(_, _) -> todo
     glance.PatternBitString(_) -> todo
-    glance.PatternConstructor(_, _, _, _) -> todo
+    glance.PatternConstructor(
+      maybe_module_name,
+      constructor_name,
+      args,
+      with_spread,
+    ) -> {
+      // TODO: support unqualified constructor imports & aliased constructors
+      use #(module_id, custom_types) <- result.try(case maybe_module_name {
+        None ->
+          Ok(#(context.internals.location, context.internals.custom_types))
+        Some(module_name) ->
+          dict.get(context.internals.imports, module_name)
+          |> result.replace_error(compiler.ReferenceError(module_name))
+          |> result.map(fn(module) { #(module.location, module.custom_types) })
+      })
+      use #(type_name, custom_type) <- result.try(
+        dict.to_list(custom_types)
+        |> list.find(fn(pair) {
+          let #(_name, custom_type) = pair
+          list.any(custom_type.variants, fn(variant) {
+            variant.name == constructor_name
+          })
+        })
+        |> result.replace_error(compiler.ReferenceError(constructor_name)),
+      )
+      use variant <- result.try(
+        list.find(custom_type.variants, fn(variant) {
+          variant.name == constructor_name
+        })
+        |> result.replace_error(compiler.ReferenceError(constructor_name)),
+      )
+      use arg_pairs <- result.try(pair_args(
+        expected: variant.fields,
+        actual: args |> list.map(fn(field) { Field(field.label, field.item) }),
+        at: compiler.AtPattern(pattern),
+      ))
+      use <- bool.guard(
+        when: !with_spread
+          && list.any(arg_pairs, fn(pair) { option.is_none(pair.second(pair)) }),
+        return: Error(compiler.AnotherTypeError),
+      )
+      // TODO: deduplicate with tuple arguments?
+      list.try_fold(
+        over: arg_pairs,
+        from: #(context, environment, []),
+        with: fn(acc, arg_pair) {
+          let #(context, environment, patterns) = acc
+          let #(param_type, maybe_pattern) = arg_pair
+          let pattern = option.unwrap(maybe_pattern, glance.PatternDiscard(""))
+          init_inference_pattern(pattern, param_type, environment, context)
+          |> result.map(fn(res) {
+            let #(context, environment, pattern) = res
+            #(context, environment, [pattern, ..patterns])
+          })
+        },
+      )
+      |> result.map(fn(res) {
+        let #(context, environment, patterns) = res
+        let patterns = list.reverse(patterns)
+        #(
+          context,
+          environment,
+          PatternConstructor(
+            TypeFromModule(module_id, type_name),
+            variant,
+            patterns,
+          ),
+        )
+      })
+    }
   }
 }
 
@@ -701,6 +839,7 @@ pub fn init_inference(
                   )
               }
             Field(None, field_type) ->
+              // TODO: may not be right, what if a positional argument is provided
               init_inference_call_builtin(
                 AccessField(Some(variant.name), ByPosition(index)),
                 [record],
