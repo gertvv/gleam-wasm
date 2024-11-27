@@ -795,6 +795,13 @@ pub fn type_infer_function_with_return_annotation_test() {
     )
 
   // fn(x) { Some(x) }
+  // TODO: $5 is pretty arbitrary!
+  let type_var = analysis.TypeVariable("$5")
+  let option_with_type_var =
+    analysis.TypeConstructor(
+      analysis.TypeFromModule(option_module_id, "Option"),
+      [type_var],
+    )
   glance.Fn([glance.FnParameter(glance.Named("x"), None)], None, [
     glance.Expression(
       glance.Call(glance.FieldAccess(glance.Variable("option"), "Some"), [
@@ -811,16 +818,16 @@ pub fn type_infer_function_with_return_annotation_test() {
   |> should.equal(
     Ok(
       analysis.Fn(
-        analysis.FunctionType([analysis.TypeVariable("a")], option_type),
+        analysis.FunctionType([type_var], option_with_type_var),
         [glance.Named("x")],
         [
           analysis.Expression(
             analysis.Call(
               analysis.FunctionReference(
-                analysis.FunctionType([analysis.TypeVariable("a")], option_type),
+                analysis.FunctionType([type_var], option_with_type_var),
                 analysis.FunctionFromModule(option_module_id, "Some"),
               ),
-              [analysis.Variable(analysis.TypeVariable("a"), "x")],
+              [analysis.Variable(type_var, "x")],
             ),
           ),
         ],
@@ -914,6 +921,47 @@ pub fn type_infer_tuple_index_test() {
   )
 }
 
+pub fn type_infer_nested_generics_test() {
+  let module_id = project.SourceLocation("foo", "bar")
+
+  let holder = fn(t) {
+    analysis.TypeConstructor(analysis.TypeFromModule(module_id, "Holder"), [t])
+  }
+  let holder_constructor = fn(t) {
+    analysis.FunctionReference(
+      analysis.FunctionType([t], holder(t)),
+      analysis.FunctionFromModule(module_id, "Holder"),
+    )
+  }
+  let a = analysis.TypeVariable("a")
+
+  glance.Call(glance.Variable("Holder"), [
+    glance.Field(
+      None,
+      glance.Call(glance.Variable("Holder"), [
+        glance.Field(None, glance.Int("42")),
+      ]),
+    ),
+  ])
+  |> analysis.infer(
+    analysis.ModuleInternals(
+      ..empty_module_internals("foo", "bar"),
+      functions: dict.from_list([
+        #("Holder", analysis.FunctionType([a], holder(a))),
+      ]),
+    ),
+  )
+  |> should.equal(
+    Ok(
+      analysis.Call(holder_constructor(holder(analysis.int_type)), [
+        analysis.Call(holder_constructor(analysis.int_type), [
+          analysis.Int("42"),
+        ]),
+      ]),
+    ),
+  )
+}
+
 pub fn type_infer_let_pattern_test() {
   glance.Block([
     glance.Assignment(
@@ -962,7 +1010,72 @@ pub fn type_infer_let_pattern_test() {
 }
 
 pub fn type_infer_constructor_pattern_test() {
-  todo
+  let module_id = project.SourceLocation("foo", "bar")
+  let my_type_id = analysis.TypeFromModule(module_id, "MyType")
+  let my_type =
+    analysis.TypeConstructor(my_type_id, [analysis.TypeVariable("a")])
+  let variant_a =
+    analysis.Variant("VariantA", [analysis.Field(Some("x"), analysis.int_type)])
+  let variant_b =
+    analysis.Variant("VariantB", [
+      analysis.Field(Some("x"), analysis.int_type),
+      analysis.Field(Some("y"), analysis.TypeVariable("a")),
+    ])
+  let my_type_definition =
+    analysis.CustomType([], False, [variant_a, variant_b])
+  let var_b_constructor_type =
+    analysis.FunctionType(
+      [analysis.int_type, analysis.TypeVariable("a")],
+      my_type,
+    )
+  let internals =
+    analysis.ModuleInternals(
+      project: project.Project("name", dict.new(), fn(_, _) { panic }),
+      location: module_id,
+      imports: dict.new(),
+      types: dict.from_list([#("MyType", analysis.GenericType(my_type, []))]),
+      custom_types: dict.from_list([#("MyType", my_type_definition)]),
+      functions: dict.from_list([
+        #("VariantA", analysis.FunctionType([analysis.int_type], my_type)),
+        #("VariantB", var_b_constructor_type),
+      ]),
+    )
+
+  let assert Ok(#(new_context, environment, pattern)) =
+    glance.PatternConstructor(
+      None,
+      "VariantB",
+      [glance.Field(Some("y"), glance.PatternString("str_val"))],
+      True,
+    )
+    |> analysis.init_inference_pattern(
+      analysis.TypeVariable("$1"),
+      dict.new(),
+      analysis.Context(
+        internals,
+        dict.from_list([#("$1", analysis.TypeVariable("$1"))]),
+        [],
+        2,
+      ),
+    )
+
+  pattern
+  |> should.equal(
+    analysis.PatternConstructor(my_type_id, variant_b, [
+      analysis.PatternDiscard(""),
+      analysis.PatternString("str_val"),
+    ]),
+  )
+  new_context.constraints
+  |> should.equal([
+    analysis.Equal(
+      analysis.TypeVariable("$1"),
+      analysis.TypeConstructor(my_type_id, [analysis.TypeVariable("$2")]),
+    ),
+    analysis.Equal(analysis.TypeVariable("$2"), analysis.string_type),
+  ])
+  environment |> should.equal(dict.new())
+  // TODO: test a pattern that adds to the environment
 }
 
 pub fn type_infer_field_access_test() {

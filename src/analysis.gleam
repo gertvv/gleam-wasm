@@ -107,7 +107,7 @@ pub type Module {
     imports: Dict(String, ModuleId),
     types: Dict(String, GenericType),
     custom_types: Dict(String, CustomType),
-    // TODO: functions require more meta-data than just Type
+    // TODO: functions require more meta-data than just Type -- arg labels at least
     functions: Dict(String, Type),
   )
 }
@@ -415,23 +415,51 @@ pub fn init_inference_pattern(
       with_spread,
     ) -> {
       // TODO: support unqualified constructor imports & aliased constructors
-      use #(module_id, custom_types) <- result.try(case maybe_module_name {
+      //
+      // resolve the module
+      use #(module_id, functions, custom_types) <- result.try(case
+        maybe_module_name
+      {
         None ->
-          Ok(#(context.internals.location, context.internals.custom_types))
+          Ok(#(
+            context.internals.location,
+            context.internals.functions,
+            context.internals.custom_types,
+          ))
         Some(module_name) ->
           dict.get(context.internals.imports, module_name)
           |> result.replace_error(compiler.ReferenceError(module_name))
-          |> result.map(fn(module) { #(module.location, module.custom_types) })
-      })
-      use #(type_name, custom_type) <- result.try(
-        dict.to_list(custom_types)
-        |> list.find(fn(pair) {
-          let #(_name, custom_type) = pair
-          list.any(custom_type.variants, fn(variant) {
-            variant.name == constructor_name
+          |> result.map(fn(module) {
+            #(module.location, module.functions, module.custom_types)
           })
-        })
-        |> result.replace_error(compiler.ReferenceError(constructor_name)),
+      })
+      // find the constructor & related types
+      use #(context, type_name, param_types, constructed_type) <- result.try(case
+        dict.get(functions, constructor_name)
+      {
+        Ok(t) -> {
+          case replace_free_type_variables(t, context) {
+            #(
+              context,
+              FunctionType(
+                param_types,
+                TypeConstructor(
+                  TypeFromModule(_module, custom_type_name),
+                  _type_params,
+                ) as constructed_type,
+              ),
+            ) -> {
+              Ok(#(context, custom_type_name, param_types, constructed_type))
+            }
+            _ -> Error(compiler.AnotherTypeError("Unexpected constructor type"))
+          }
+        }
+        Error(Nil) -> Error(compiler.ReferenceError(constructor_name))
+      })
+      // get the custom type and variant
+      use custom_type <- result.try(
+        dict.get(custom_types, type_name)
+        |> result.replace_error(compiler.ReferenceError(type_name)),
       )
       use variant <- result.try(
         list.find(custom_type.variants, fn(variant) {
@@ -439,15 +467,23 @@ pub fn init_inference_pattern(
         })
         |> result.replace_error(compiler.ReferenceError(constructor_name)),
       )
+      // apply type variable substitution to variant fields
+      let expected_fields =
+        list.map2(variant.fields, param_types, fn(field, type_) {
+          Field(field.label, type_)
+        })
+      // pair up arguments
       use arg_pairs <- result.try(pair_args(
-        expected: variant.fields,
+        expected: expected_fields,
         actual: args |> list.map(fn(field) { Field(field.label, field.item) }),
         at: compiler.AtPattern(pattern),
       ))
       use <- bool.guard(
         when: !with_spread
           && list.any(arg_pairs, fn(pair) { option.is_none(pair.second(pair)) }),
-        return: Error(compiler.AnotherTypeError),
+        return: Error(compiler.AnotherTypeError(
+          "Constructor pattern without spread must specify all arguments",
+        )),
       )
       // TODO: deduplicate with tuple arguments?
       list.try_fold(
@@ -468,7 +504,11 @@ pub fn init_inference_pattern(
         let #(context, environment, patterns) = res
         let patterns = list.reverse(patterns)
         #(
-          context,
+          add_constraint(
+            context,
+            Equal(expected_type, constructed_type),
+            // TODO: handle type args
+          ),
           environment,
           PatternConstructor(
             TypeFromModule(module_id, type_name),
@@ -653,7 +693,7 @@ pub fn init_inference(
     glance.Variable(name) -> {
       use <- result.lazy_or(
         dict.get(environment, name)
-        |> result.map_error(fn(_) { compiler.ReferenceError(name) })
+        |> result.replace_error(compiler.ReferenceError(name))
         |> result.map(fn(variable_type) {
           #(
             add_constraint(context, Equal(expected_type, variable_type)),
@@ -662,8 +702,10 @@ pub fn init_inference(
         }),
       )
       dict.get(context.internals.functions, name)
-      |> result.map_error(fn(_) { compiler.ReferenceError(name) })
+      |> result.replace_error(compiler.ReferenceError(name))
       |> result.map(fn(function_type) {
+        let #(context, function_type) =
+          replace_free_type_variables(function_type, context)
         #(
           add_constraint(context, Equal(expected_type, function_type)),
           FunctionReference(
@@ -793,7 +835,7 @@ pub fn init_inference(
           None ->
             Ok(#(context.internals.functions, context.internals.custom_types))
         }
-        |> result.map_error(fn(_) { compiler.AnotherTypeError }),
+        |> result.replace_error(compiler.AnotherTypeError("Module not found")),
       )
       // identify the custom type and variant used
       use #(module_id, custom_type, variant) <- result.try(case
@@ -810,9 +852,9 @@ pub fn init_inference(
             })
             |> result.map(fn(variant) { #(module_id, return_type, variant) })
           })
-          |> result.map_error(fn(_) { compiler.AnotherTypeError })
+          |> result.replace_error(compiler.AnotherTypeError("Variant not found"))
         }
-        _ -> Error(compiler.AnotherTypeError)
+        _ -> Error(compiler.AnotherTypeError("Unexpected constructor type"))
       })
       // TODO: check all fields that are attempted to be set, exist
       // TODO: check that the variant has any record fields
@@ -857,7 +899,7 @@ pub fn init_inference(
       let args = list.reverse(args)
       // now call the constructor
       dict.get(functions, variant.name)
-      |> result.map_error(fn(_) { compiler.AnotherTypeError })
+      |> result.replace_error(compiler.AnotherTypeError("Constructor not found"))
       |> result.map(fn(constructor_type) {
         #(
           add_constraint(context, Equal(expected_type, custom_type)),
@@ -883,6 +925,8 @@ pub fn init_inference(
       |> result.try(fn(module) {
         dict.get(module.functions, label)
         |> result.map(fn(function_type) {
+          let #(context, function_type) =
+            replace_free_type_variables(function_type, context)
           #(
             add_constraint(context, Equal(expected_type, function_type)),
             FunctionReference(
@@ -892,7 +936,7 @@ pub fn init_inference(
           )
         })
       })
-      |> result.map_error(fn(_) { compiler.AnotherTypeError })
+      |> result.replace_error(compiler.AnotherTypeError("Field access error"))
       |> result.lazy_or(fn() {
         init_inference_call_builtin(
           AccessField(None, ByLabel(label)),
@@ -1016,7 +1060,10 @@ fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
     TypeVariable(i), TypeVariable(j) if i == j -> Ok(context)
     FunctionType(args_i, ret_i), FunctionType(args_j, ret_j) -> {
       case list.length(args_i) == list.length(args_j) {
-        False -> Error(compiler.AnotherTypeError)
+        False ->
+          Error(compiler.AnotherTypeError(
+            "Unable to unify argument lists of different lengths",
+          ))
         True -> {
           list.zip([ret_i, ..args_i], [ret_j, ..args_j])
           |> list.try_fold(from: context, with: fn(context, pair) {
@@ -1029,17 +1076,25 @@ fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
     _, TypeVariable(_) if sub_b != b -> unify(context, a, sub_b)
     TypeVariable(i), _ ->
       case occurs_in(i, b) {
-        True -> Error(compiler.AnotherTypeError)
+        True ->
+          Error(compiler.AnotherTypeError(
+            "Can not substitute variable by expression that contains it",
+          ))
         False -> Ok(add_substitution(context, i, b))
       }
     _, TypeVariable(j) ->
       case occurs_in(j, a) {
-        True -> Error(compiler.AnotherTypeError)
+        True ->
+          Error(compiler.AnotherTypeError(
+            "Can not substitute variable by expression that contains it",
+          ))
         False -> Ok(add_substitution(context, j, a))
       }
     TypeConstructor(id_i, args_i), TypeConstructor(id_j, args_j) -> {
       case id_i == id_j && list.length(args_i) == list.length(args_j) {
-        False -> Error(compiler.AnotherTypeError)
+        False -> {
+          Error(compiler.AnotherTypeError("Mismatching TypeConstructors"))
+        }
         True -> {
           list.zip(args_i, args_j)
           |> list.try_fold(from: context, with: fn(context, pair) {
@@ -1050,7 +1105,7 @@ fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
     }
     FunctionType(_, _), TypeConstructor(_, _)
     | TypeConstructor(_, _), FunctionType(_, _)
-    -> Error(compiler.AnotherTypeError)
+    -> Error(compiler.AnotherTypeError("Unification not implemented"))
   }
 }
 
@@ -1073,20 +1128,26 @@ pub fn solve_constraints(
         use #(module_id, type_name) <- result.try(case container_type {
           TypeConstructor(TypeFromModule(module_id, type_name), _params) ->
             Ok(#(module_id, type_name))
-          FunctionType(_, _) -> Error(compiler.AnotherTypeError)
-          TypeConstructor(BuiltInType(_), _) -> Error(compiler.AnotherTypeError)
+          FunctionType(_, _) ->
+            Error(compiler.AnotherTypeError(
+              "Can not access field of function type",
+            ))
+          TypeConstructor(BuiltInType(_), _) ->
+            Error(compiler.AnotherTypeError(
+              "Can not access field of built-in type",
+            ))
           TypeVariable(_) ->
             case get_sub(context, container_type) {
-              None -> Error(compiler.AnotherTypeError)
+              None ->
+                Error(compiler.AnotherTypeError(
+                  "Type variable does not have substitution",
+                ))
               Some(TypeConstructor(
                 TypeFromModule(module_id, type_name),
                 _params,
               )) -> Ok(#(module_id, type_name))
-              Some(thing) -> {
-                io.debug("Got some unexpected container type")
-                io.debug(thing)
-                pprint.debug(context.constraints)
-                Error(compiler.AnotherTypeError)
+              Some(_) -> {
+                Error(compiler.AnotherTypeError("Unexpected container type"))
               }
             }
         })
@@ -1102,10 +1163,9 @@ pub fn solve_constraints(
             }
           })
           |> result.try(dict.get(_, type_name))
-          |> result.map_error(fn(_) {
-            io.debug("Could not find type")
-            compiler.AnotherTypeError
-          }),
+          |> result.replace_error(compiler.AnotherTypeError(
+            "Could not find type",
+          )),
         )
         // TODO: add fields as an attribute of custom types
         list.try_map(custom_type.variants, fn(variant) {
@@ -1116,10 +1176,9 @@ pub fn solve_constraints(
             }
           })
         })
-        |> result.map_error(fn(_) {
-          io.debug("Not all variants have field")
-          compiler.AnotherTypeError
-        })
+        |> result.replace_error(compiler.AnotherTypeError(
+          "Not all variants have field",
+        ))
         |> result.try(fn(fields) {
           let types =
             list.map(fields, fn(field) { field.item })
@@ -1127,8 +1186,9 @@ pub fn solve_constraints(
           case types {
             [t] -> Ok(t)
             _ -> {
-              io.debug("Field type not consistent across variants")
-              Error(compiler.AnotherTypeError)
+              Error(compiler.AnotherTypeError(
+                "Field type not consistent across variants",
+              ))
             }
           }
         })
@@ -1136,26 +1196,63 @@ pub fn solve_constraints(
       }
       HasFieldOfType(container_type, ByPosition(i), field_type) -> {
         use tuple_params <- result.try(case container_type {
-          FunctionType(_, _) -> Error(compiler.AnotherTypeError)
+          FunctionType(_, _) ->
+            Error(compiler.AnotherTypeError("Functions do not have fields"))
           TypeConstructor(BuiltInType(TupleType(_n)), params) -> Ok(params)
-          TypeConstructor(_, _) -> Error(compiler.AnotherTypeError)
+          TypeConstructor(_, _) ->
+            Error(compiler.AnotherTypeError(
+              "ByPosition constraint not implemented for Constructor",
+            ))
           TypeVariable(_) ->
             case get_sub(context, container_type) {
-              None -> Error(compiler.AnotherTypeError)
+              None ->
+                Error(compiler.AnotherTypeError(
+                  "No substitution for type variable",
+                ))
               Some(TypeConstructor(BuiltInType(TupleType(_n)), params)) ->
                 Ok(params)
-              Some(_) -> Error(compiler.AnotherTypeError)
+              Some(_) ->
+                Error(compiler.AnotherTypeError(
+                  "ByPosition not implemented for non-tuple type",
+                ))
             }
         })
         list.split(tuple_params, i)
         |> pair.second
         |> list.first
-        |> result.map_error(fn(_) { compiler.AnotherTypeError })
+        |> result.replace_error(compiler.AnotherTypeError(
+          "Tuple does not have element at the given index",
+        ))
         |> result.try(unify(context, _, field_type))
       }
     }
   })
   |> result.map(fn(context) { context.substitution })
+}
+
+pub fn find_free_type_variables(t: Type) -> List(String) {
+  case t {
+    FunctionType(params, return) ->
+      [return, ..params] |> list.flat_map(find_free_type_variables)
+    TypeConstructor(_id, params) ->
+      params |> list.flat_map(find_free_type_variables)
+    TypeVariable(name) -> [name]
+  }
+}
+
+pub fn replace_free_type_variables(
+  t: Type,
+  context: Context,
+) -> #(Context, Type) {
+  let #(context, substitution) =
+    find_free_type_variables(t)
+    |> list.unique
+    |> list.map_fold(from: context, with: fn(context, name) {
+      let #(context, var) = fresh_type_variable(context)
+      #(context, #(name, var))
+    })
+    |> pair.map_second(dict.from_list)
+  #(context, substitute(t, substitution))
 }
 
 pub fn substitute(t: Type, subs: Dict(String, Type)) -> Type {
@@ -1226,6 +1323,7 @@ pub fn substitute_expression(
   }
 }
 
+// TODO: also return a list of free type variables?
 pub fn infer(
   expr: glance.Expression,
   data: ModuleInternals,
@@ -1274,7 +1372,7 @@ fn resolve_module(
     _,
     imported_module,
   ))
-  |> result.map_error(fn(_) { compiler.ReferenceError(imported_module) })
+  |> result.replace_error(compiler.ReferenceError(imported_module))
 }
 
 // TODO: split public_types vs private_types
@@ -1318,13 +1416,13 @@ pub fn resolve_type(
         None ->
           dict.get(data.types, name)
           |> result.map(fn(t) { #(data.location, t) })
-          |> result.map_error(fn(_) { compiler.ReferenceError(name) })
+          |> result.replace_error(compiler.ReferenceError(name))
         Some(module_alias) ->
           dict.get(data.imports, module_alias)
-          |> result.map_error(fn(_) { compiler.ReferenceError(module_alias) })
+          |> result.replace_error(compiler.ReferenceError(module_alias))
           |> result.try(fn(module) {
             dict.get(module.types, name)
-            |> result.map_error(fn(_) { compiler.ReferenceError(name) })
+            |> result.replace_error(compiler.ReferenceError(name))
             |> result.map(fn(def) {
               #(module.location, prototype(def.parameters))
             })
@@ -1335,13 +1433,11 @@ pub fn resolve_type(
           case candidate_type, params {
             GenericType(typ: nested_type, parameters: exp_params), act_params -> {
               list.strict_zip(exp_params, act_params)
-              |> result.map_error(fn(_) {
-                compiler.TypeArityError(
-                  declared_type,
-                  list.length(exp_params),
-                  list.length(act_params),
-                )
-              })
+              |> result.replace_error(compiler.TypeArityError(
+                declared_type,
+                list.length(exp_params),
+                list.length(act_params),
+              ))
               |> result.try(list.try_map(_, fn(param_def) {
                 let #(param_name, param_type) = param_def
                 resolve_type(data, param_type)
@@ -1555,8 +1651,6 @@ fn analyze_high_level(
     |> result.map(fn(module) { #(module, modules) }),
   )
   use parsed <- result.try(project.parse_module(project, location))
-  //io.debug(parsed)
-  //panic
   use #(imports, modules) <- result.try(
     list.try_fold(parsed.imports, #([], modules), fn(acc, import_) {
       let #(imports, modules) = acc

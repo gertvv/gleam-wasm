@@ -29,7 +29,7 @@ pub type CompilerError {
   PositionalArgsAfterLabeledArgsError(at: ErrorLocation)
   NoSuchFieldError(at: ErrorLocation, field: String)
   TypeArityError(type_: Type, expected_number: Int, actual_number: Int)
-  AnotherTypeError
+  AnotherTypeError(String)
 }
 
 pub type FunctionImport {
