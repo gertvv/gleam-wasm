@@ -853,7 +853,10 @@ pub fn type_infer_block_test() {
         analysis.Fn(analysis.FunctionType([], analysis.int_type), [], [
           analysis.Assignment(
             glance.Let,
-            analysis.PatternVariable("x"),
+            analysis.PatternWithParams(
+              analysis.PatternVariable("x"),
+              dict.from_list([#("x", analysis.int_type)]),
+            ),
             analysis.Int("42"),
           ),
           analysis.Expression(analysis.Variable(analysis.int_type, "x")),
@@ -982,10 +985,13 @@ pub fn type_infer_let_pattern_test() {
         analysis.Fn(analysis.FunctionType([], analysis.float_type), [], [
           analysis.Assignment(
             glance.Let,
-            analysis.PatternTuple([
-              analysis.PatternDiscard(""),
-              analysis.PatternVariable("y"),
-            ]),
+            analysis.PatternWithParams(
+              analysis.PatternTuple([
+                analysis.PatternDiscard(""),
+                analysis.PatternVariable("y"),
+              ]),
+              dict.from_list([#("y", analysis.float_type)]),
+            ),
             analysis.Call(
               analysis.FunctionReference(
                 analysis.FunctionType(
@@ -1041,7 +1047,7 @@ pub fn type_infer_constructor_pattern_test() {
       ]),
     )
 
-  let assert Ok(#(new_context, environment, pattern)) =
+  let assert Ok(#(new_context, pattern)) =
     glance.PatternConstructor(
       None,
       "VariantB",
@@ -1060,12 +1066,13 @@ pub fn type_infer_constructor_pattern_test() {
     )
 
   pattern
-  |> should.equal(
+  |> should.equal(analysis.PatternWithParams(
     analysis.PatternConstructor(my_type_id, variant_b, [
       analysis.PatternDiscard(""),
       analysis.PatternString("str_val"),
     ]),
-  )
+    dict.new(),
+  ))
   new_context.constraints
   |> should.equal([
     analysis.Equal(
@@ -1074,8 +1081,39 @@ pub fn type_infer_constructor_pattern_test() {
     ),
     analysis.Equal(analysis.TypeVariable("$2"), analysis.string_type),
   ])
-  environment |> should.equal(dict.new())
-  // TODO: test a pattern that adds to the environment
+
+  let assert Ok(#(_context, pattern)) =
+    glance.PatternConstructor(
+      None,
+      "VariantB",
+      [
+        glance.Field(None, glance.PatternVariable("g")),
+        glance.Field(None, glance.PatternVariable("h")),
+      ],
+      False,
+    )
+    |> analysis.init_inference_pattern(
+      analysis.TypeVariable("$1"),
+      dict.new(),
+      analysis.Context(
+        internals,
+        dict.from_list([#("$1", analysis.TypeVariable("$1"))]),
+        [],
+        2,
+      ),
+    )
+
+  pattern
+  |> should.equal(analysis.PatternWithParams(
+    analysis.PatternConstructor(my_type_id, variant_b, [
+      analysis.PatternVariable("g"),
+      analysis.PatternVariable("h"),
+    ]),
+    dict.from_list([
+      #("g", analysis.int_type),
+      #("h", analysis.TypeVariable("$2")),
+    ]),
+  ))
 }
 
 pub fn type_infer_field_access_test() {
@@ -1170,7 +1208,10 @@ pub fn type_infer_field_access_test() {
         analysis.Fn(analysis.FunctionType([], my_type), [], [
           analysis.Assignment(
             glance.Let,
-            analysis.PatternVariable("record"),
+            analysis.PatternWithParams(
+              analysis.PatternVariable("record"),
+              dict.from_list([#("record", my_type)]),
+            ),
             analysis.Call(variant_b_constructor, [
               analysis.Int("42"),
               analysis.Float("3.14"),

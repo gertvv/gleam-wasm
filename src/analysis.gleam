@@ -159,8 +159,16 @@ pub type Pattern {
   )
 }
 
+pub type PatternWithParams {
+  PatternWithParams(pattern: Pattern, params: Dict(String, Type))
+}
+
 pub type Statement {
-  Assignment(kind: glance.AssignmentKind, pattern: Pattern, value: Expression)
+  Assignment(
+    kind: glance.AssignmentKind,
+    pattern: PatternWithParams,
+    value: Expression,
+  )
   Expression(expression: Expression)
 }
 
@@ -328,58 +336,65 @@ pub fn pair_args(
   |> Ok
 }
 
+fn unzip_patterns_with_params(
+  patterns: List(PatternWithParams),
+) -> #(List(Pattern), Dict(String, Type)) {
+  #(
+    patterns |> list.map(fn(pattern) { pattern.pattern }),
+    patterns
+      |> list.fold(from: dict.new(), with: fn(params, pattern) {
+        dict.merge(params, pattern.params)
+      }),
+  )
+}
+
 pub fn init_inference_pattern(
   pattern: glance.Pattern,
   expected_type: Type,
   environment: Dict(String, Type),
   context: Context,
-) -> Result(#(Context, Dict(String, Type), Pattern), CompilerError) {
+) -> Result(#(Context, PatternWithParams), CompilerError) {
   // TODO: assign a type to all patterns? Or maybe only where value is assigned?
   case pattern {
     glance.PatternInt(value) ->
       Ok(#(
         add_constraint(context, Equal(expected_type, int_type)),
-        environment,
-        PatternInt(value),
+        PatternWithParams(PatternInt(value), dict.new()),
       ))
     glance.PatternFloat(value) ->
       Ok(#(
         add_constraint(context, Equal(expected_type, float_type)),
-        environment,
-        PatternFloat(value),
+        PatternWithParams(PatternFloat(value), dict.new()),
       ))
     glance.PatternString(value) ->
       Ok(#(
         add_constraint(context, Equal(expected_type, string_type)),
-        environment,
-        PatternString(value),
+        PatternWithParams(PatternString(value), dict.new()),
       ))
     glance.PatternDiscard(name) -> {
-      Ok(#(context, environment, PatternDiscard(name)))
+      Ok(#(context, PatternWithParams(PatternDiscard(name), dict.new())))
     }
     glance.PatternVariable(name) -> {
       Ok(#(
         context,
-        dict.insert(environment, name, expected_type),
-        PatternVariable(name),
+        PatternWithParams(
+          PatternVariable(name),
+          dict.from_list([#(name, expected_type)]),
+        ),
       ))
     }
     glance.PatternTuple(elems) -> {
-      list.try_fold(
-        over: elems,
-        from: #(context, environment, []),
-        with: fn(acc, elem) {
-          let #(context, environment, patterns) = acc
-          let #(context, elem_type) = fresh_type_variable(context)
-          init_inference_pattern(elem, elem_type, environment, context)
-          |> result.map(fn(res) {
-            let #(context, environment, pattern) = res
-            #(context, environment, [#(elem_type, pattern), ..patterns])
-          })
-        },
-      )
+      list.try_fold(over: elems, from: #(context, []), with: fn(acc, elem) {
+        let #(context, patterns) = acc
+        let #(context, elem_type) = fresh_type_variable(context)
+        init_inference_pattern(elem, elem_type, environment, context)
+        |> result.map(fn(res) {
+          let #(context, pattern) = res
+          #(context, [#(elem_type, pattern), ..patterns])
+        })
+      })
       |> result.map(fn(res) {
-        let #(context, environment, typed_patterns) = res
+        let #(context, typed_patterns) = res
         let #(types, patterns) = typed_patterns |> list.reverse |> list.unzip
         #(
           add_constraint(
@@ -389,8 +404,11 @@ pub fn init_inference_pattern(
               expected_type,
             ),
           ),
-          environment,
-          PatternTuple(patterns),
+          unzip_patterns_with_params(patterns)
+            |> fn(unzipped) {
+              let #(patterns, params) = unzipped
+              PatternWithParams(PatternTuple(patterns), params)
+            },
         )
       })
     }
@@ -398,11 +416,13 @@ pub fn init_inference_pattern(
     glance.PatternAssignment(pattern, name) -> {
       init_inference_pattern(pattern, expected_type, environment, context)
       |> result.map(fn(res) {
-        let #(context, environment, pattern) = res
+        let #(context, pattern) = res
         #(
           context,
-          dict.insert(environment, name, expected_type),
-          PatternAssignment(pattern, name),
+          PatternWithParams(
+            PatternAssignment(pattern.pattern, name),
+            dict.insert(pattern.params, name, expected_type),
+          ),
         )
       })
     }
@@ -488,33 +508,35 @@ pub fn init_inference_pattern(
       // TODO: deduplicate with tuple arguments?
       list.try_fold(
         over: arg_pairs,
-        from: #(context, environment, []),
+        from: #(context, []),
         with: fn(acc, arg_pair) {
-          let #(context, environment, patterns) = acc
+          let #(context, patterns) = acc
           let #(param_type, maybe_pattern) = arg_pair
           let pattern = option.unwrap(maybe_pattern, glance.PatternDiscard(""))
           init_inference_pattern(pattern, param_type, environment, context)
           |> result.map(fn(res) {
-            let #(context, environment, pattern) = res
-            #(context, environment, [pattern, ..patterns])
+            let #(context, pattern) = res
+            #(context, [pattern, ..patterns])
           })
         },
       )
       |> result.map(fn(res) {
-        let #(context, environment, patterns) = res
+        let #(context, patterns) = res
         let patterns = list.reverse(patterns)
         #(
-          add_constraint(
-            context,
-            Equal(expected_type, constructed_type),
-            // TODO: handle type args
-          ),
-          environment,
-          PatternConstructor(
-            TypeFromModule(module_id, type_name),
-            variant,
-            patterns,
-          ),
+          add_constraint(context, Equal(expected_type, constructed_type)),
+          unzip_patterns_with_params(patterns)
+            |> fn(unzipped) {
+              let #(patterns, params) = unzipped
+              PatternWithParams(
+                PatternConstructor(
+                  TypeFromModule(module_id, type_name),
+                  variant,
+                  patterns,
+                ),
+                params,
+              )
+            },
         )
       })
     }
@@ -544,13 +566,17 @@ pub fn init_inference_statement(
         environment,
         context,
       ))
-      use #(context, environment, pattern) <- result.map(init_inference_pattern(
+      use #(context, pattern) <- result.map(init_inference_pattern(
         pattern,
         assignment_type,
         environment,
         context,
       ))
-      #(context, environment, Assignment(glance.Let, pattern, expr))
+      #(
+        context,
+        dict.merge(environment, pattern.params),
+        Assignment(glance.Let, pattern, expr),
+      )
     }
     glance.Assignment(_, _, _, _) -> todo
     glance.Expression(expr) ->
@@ -1290,8 +1316,15 @@ pub fn substitute_statement(
 ) -> Statement {
   case stmt {
     Expression(expr) -> Expression(substitute_expression(expr, subs))
-    Assignment(kind, pattern, expr) ->
-      Assignment(kind, pattern, substitute_expression(expr, subs))
+    Assignment(kind, PatternWithParams(pattern, params), expr) ->
+      Assignment(
+        kind,
+        PatternWithParams(
+          pattern,
+          dict.map_values(params, fn(_name, typ) { substitute(typ, subs) }),
+        ),
+        substitute_expression(expr, subs),
+      )
   }
 }
 
