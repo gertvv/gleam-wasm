@@ -139,6 +139,12 @@ pub type Expression {
   Call(function: Expression, arguments: List(Expression))
 }
 
+pub type PatternList {
+  PatternEmpty
+  PatternTail(Pattern)
+  PatternNonEmpty(head: Pattern, tail: PatternList)
+}
+
 /// Patterns used in assignments and case expressions
 pub type Pattern {
   PatternInt(value: String)
@@ -147,9 +153,9 @@ pub type Pattern {
   PatternDiscard(name: String)
   PatternVariable(name: String)
   PatternTuple(elems: List(Pattern))
-  //PatternList
+  PatternList(PatternList)
   PatternAssignment(pattern: Pattern, name: String)
-  // PatternConcatenate
+  PatternConcatenate(left: String, right: Pattern)
   // PatternBitString
   /// Variant constructor. Normalized to use positional arguments. Any unspecified fields are represented by `PatternDiscard("")`.
   PatternConstructor(
@@ -348,6 +354,72 @@ fn unzip_patterns_with_params(
   )
 }
 
+fn init_inference_pattern_list(
+  items: List(glance.Pattern),
+  rest: Option(glance.Pattern),
+  expected_type: Type,
+  environment: Dict(String, Type),
+  context: Context,
+) -> Result(#(Context, PatternList, Dict(String, Type)), CompilerError) {
+  let #(context, item_type) = fresh_type_variable(context)
+  case items, rest {
+    [], None ->
+      Ok(#(
+        add_constraint(context, Equal(expected_type, list_type(item_type))),
+        PatternEmpty,
+        dict.new(),
+      ))
+    [], Some(tail_pattern) -> {
+      use #(context, pattern) <- result.map(init_inference_pattern(
+        tail_pattern,
+        list_type(item_type),
+        environment,
+        context,
+      ))
+      #(
+        add_constraint(context, Equal(expected_type, list_type(item_type))),
+        PatternTail(pattern.pattern),
+        pattern.params,
+      )
+    }
+    [item], None -> {
+      use #(context, item_pattern) <- result.map(init_inference_pattern(
+        item,
+        item_type,
+        environment,
+        context,
+      ))
+      #(
+        add_constraint(context, Equal(expected_type, list_type(item_type))),
+        PatternNonEmpty(item_pattern.pattern, PatternEmpty),
+        item_pattern.params,
+      )
+    }
+    [item, ..more], _ -> {
+      use #(context, item_pattern) <- result.try(init_inference_pattern(
+        item,
+        item_type,
+        environment,
+        context,
+      ))
+      use #(context, more_pattern, more_params) <- result.map(
+        init_inference_pattern_list(
+          more,
+          rest,
+          list_type(item_type),
+          environment,
+          context,
+        ),
+      )
+      #(
+        add_constraint(context, Equal(expected_type, list_type(item_type))),
+        PatternNonEmpty(item_pattern.pattern, more_pattern),
+        dict.merge(item_pattern.params, more_params),
+      )
+    }
+  }
+}
+
 pub fn init_inference_pattern(
   pattern: glance.Pattern,
   expected_type: Type,
@@ -412,7 +484,18 @@ pub fn init_inference_pattern(
         )
       })
     }
-    glance.PatternList(_, _) -> todo
+    glance.PatternList(items, rest) -> {
+      use #(context, list_pattern, params) <- result.map(
+        init_inference_pattern_list(
+          items,
+          rest,
+          expected_type,
+          environment,
+          context,
+        ),
+      )
+      #(context, PatternWithParams(PatternList(list_pattern), params))
+    }
     glance.PatternAssignment(pattern, name) -> {
       init_inference_pattern(pattern, expected_type, environment, context)
       |> result.map(fn(res) {
@@ -426,7 +509,21 @@ pub fn init_inference_pattern(
         )
       })
     }
-    glance.PatternConcatenate(_, _) -> todo
+    glance.PatternConcatenate(left, right) -> {
+      Ok(#(
+        context,
+        PatternWithParams(
+          PatternConcatenate(left, case right {
+            glance.Named(name) -> PatternVariable(name)
+            glance.Discarded(name) -> PatternDiscard(name)
+          }),
+          case right {
+            glance.Named(name) -> dict.from_list([#(name, string_type)])
+            _ -> dict.new()
+          },
+        ),
+      ))
+    }
     glance.PatternBitString(_) -> todo
     glance.PatternConstructor(
       maybe_module_name,

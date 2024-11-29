@@ -1015,6 +1015,93 @@ pub fn type_infer_let_pattern_test() {
   // TODO: let assert scenario with Result
 }
 
+pub fn type_infer_list_pattern_test() {
+  let context =
+    analysis.Context(
+      empty_module_internals("foo", "bar"),
+      dict.from_list([#("$1", analysis.TypeVariable("$1"))]),
+      [],
+      2,
+    )
+
+  let assert Ok(#(new_context, empty_list_pattern)) =
+    glance.PatternList([], None)
+    |> analysis.init_inference_pattern(
+      analysis.TypeVariable("$1"),
+      dict.new(),
+      context,
+    )
+  empty_list_pattern
+  |> should.equal(analysis.PatternWithParams(
+    analysis.PatternList(analysis.PatternEmpty),
+    dict.new(),
+  ))
+  new_context.constraints
+  |> should.equal([
+    analysis.Equal(
+      analysis.TypeVariable("$1"),
+      analysis.list_type(analysis.TypeVariable("$2")),
+    ),
+  ])
+
+  let assert Ok(#(new_context, singleton_list_pattern)) =
+    glance.PatternList([glance.PatternInt("42")], None)
+    |> analysis.init_inference_pattern(
+      analysis.TypeVariable("$1"),
+      dict.new(),
+      context,
+    )
+  singleton_list_pattern
+  |> should.equal(analysis.PatternWithParams(
+    analysis.PatternList(analysis.PatternNonEmpty(
+      analysis.PatternInt("42"),
+      analysis.PatternEmpty,
+    )),
+    dict.new(),
+  ))
+  new_context.constraints
+  |> should.equal([
+    analysis.Equal(
+      analysis.TypeVariable("$1"),
+      analysis.list_type(analysis.TypeVariable("$2")),
+    ),
+    analysis.Equal(analysis.TypeVariable("$2"), analysis.int_type),
+  ])
+
+  let assert Ok(#(new_context, simple_list_pattern)) =
+    glance.PatternList(
+      [glance.PatternVariable("head")],
+      Some(glance.PatternVariable("tail")),
+    )
+    |> analysis.init_inference_pattern(
+      analysis.TypeVariable("$1"),
+      dict.new(),
+      context,
+    )
+  simple_list_pattern
+  |> should.equal(analysis.PatternWithParams(
+    analysis.PatternList(analysis.PatternNonEmpty(
+      analysis.PatternVariable("head"),
+      analysis.PatternTail(analysis.PatternVariable("tail")),
+    )),
+    dict.from_list([
+      #("head", analysis.TypeVariable("$2")),
+      #("tail", analysis.list_type(analysis.TypeVariable("$3"))),
+    ]),
+  ))
+  new_context.constraints
+  |> should.equal([
+    analysis.Equal(
+      analysis.TypeVariable("$1"),
+      analysis.list_type(analysis.TypeVariable("$2")),
+    ),
+    analysis.Equal(
+      analysis.list_type(analysis.TypeVariable("$2")),
+      analysis.list_type(analysis.TypeVariable("$3")),
+    ),
+  ])
+}
+
 pub fn type_infer_constructor_pattern_test() {
   let module_id = project.SourceLocation("foo", "bar")
   let my_type_id = analysis.TypeFromModule(module_id, "MyType")
