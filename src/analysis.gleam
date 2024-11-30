@@ -484,18 +484,17 @@ pub fn init_inference_pattern(
       ))
     }
     glance.PatternTuple(elems) -> {
-      list.try_fold(over: elems, from: #(context, []), with: fn(acc, elem) {
-        let #(context, patterns) = acc
+      try_map_fold(over: elems, from: context, with: fn(context, elem) {
         let #(context, elem_type) = fresh_type_variable(context)
         init_inference_pattern(elem, elem_type, environment, context)
         |> result.map(fn(res) {
           let #(context, pattern) = res
-          #(context, [#(elem_type, pattern), ..patterns])
+          #(context, #(elem_type, pattern))
         })
       })
       |> result.map(fn(res) {
         let #(context, typed_patterns) = res
-        let #(types, patterns) = typed_patterns |> list.reverse |> list.unzip
+        let #(types, patterns) = typed_patterns |> list.unzip
         #(
           add_constraint(
             context,
@@ -631,23 +630,13 @@ pub fn init_inference_pattern(
         )),
       )
       // TODO: deduplicate with tuple arguments?
-      list.try_fold(
-        over: arg_pairs,
-        from: #(context, []),
-        with: fn(acc, arg_pair) {
-          let #(context, patterns) = acc
-          let #(param_type, maybe_pattern) = arg_pair
-          let pattern = option.unwrap(maybe_pattern, glance.PatternDiscard(""))
-          init_inference_pattern(pattern, param_type, environment, context)
-          |> result.map(fn(res) {
-            let #(context, pattern) = res
-            #(context, [pattern, ..patterns])
-          })
-        },
-      )
+      try_map_fold(over: arg_pairs, from: context, with: fn(context, arg_pair) {
+        let #(param_type, maybe_pattern) = arg_pair
+        let pattern = option.unwrap(maybe_pattern, glance.PatternDiscard(""))
+        init_inference_pattern(pattern, param_type, environment, context)
+      })
       |> result.map(fn(res) {
         let #(context, patterns) = res
-        let patterns = list.reverse(patterns)
         #(
           add_constraint(context, Equal(expected_type, constructed_type)),
           unzip_patterns_with_variables(patterns)
@@ -722,19 +711,11 @@ fn init_inference_call(
   context: Context,
 ) -> Result(#(Context, Expression), CompilerError) {
   list.zip(args, arg_types)
-  |> list.try_fold(from: #(context, []), with: fn(acc_pair, arg_pair) {
-    let #(context, acc) = acc_pair
+  |> try_map_fold(from: context, with: fn(context, arg_pair) {
     let #(arg, arg_type) = arg_pair
     init_inference(arg, arg_type, environment, context)
-    |> result.map(fn(res) {
-      let #(context, expr) = res
-      #(context, [expr, ..acc])
-    })
   })
-  |> result.map(fn(res) {
-    let #(context, args) = res
-    #(context, Call(function, list.reverse(args)))
-  })
+  |> result.map(pair.map_second(_, Call(function, _)))
 }
 
 fn init_inference_call_builtin(
@@ -1033,13 +1014,10 @@ pub fn init_inference(
       ))
       use #(context, param_types) <- result.try(
         args
-        |> list.try_fold(from: #(context, []), with: fn(pair, param) {
-          let #(context, acc) = pair
+        |> try_map_fold(from: context, with: fn(context, param) {
           resolve_optional_type(context, param.type_)
-          |> result.map(fn(r) { #(r.0, [r.1, ..acc]) })
         }),
       )
-      let param_types = list.reverse(param_types)
 
       // TODO: should Discarded names even be added to the environment?
       let environment =
@@ -1100,8 +1078,7 @@ pub fn init_inference(
       // map variant fields to either how they are set in the record update, or their existing value
       use #(context, args) <- result.try(
         list.index_map(variant.fields, fn(field, index) { #(index, field) })
-        |> list.try_fold(from: #(context, []), with: fn(acc, pair) {
-          let #(context, exprs) = acc
+        |> try_map_fold(from: context, with: fn(context, pair) {
           let #(index, field) = pair
           case field {
             Field(Some(label), field_type) ->
@@ -1128,13 +1105,8 @@ pub fn init_inference(
                 context,
               )
           }
-          |> result.map(fn(res) {
-            let #(context, expr) = res
-            #(context, [expr, ..exprs])
-          })
         }),
       )
-      let args = list.reverse(args)
       // now call the constructor
       dict.get(functions, variant.name)
       |> result.replace_error(compiler.AnotherTypeError("Constructor not found"))
@@ -1935,9 +1907,8 @@ fn analyze_high_level(
     |> result.map(fn(module) { #(module, modules) }),
   )
   use parsed <- result.try(project.parse_module(project, location))
-  use #(imports, modules) <- result.try(
-    list.try_fold(parsed.imports, #([], modules), fn(acc, import_) {
-      let #(imports, modules) = acc
+  use #(modules, imports) <- result.try(
+    try_map_fold(parsed.imports, modules, fn(modules, import_) {
       use #(alias, location) <- result.try(case import_ {
         glance.Definition(
           definition: glance.Import(
@@ -1963,10 +1934,7 @@ fn analyze_high_level(
         location,
         modules,
       ))
-      #(
-        [#(alias, module.location), ..imports],
-        dict.insert(modules, location, module),
-      )
+      #(dict.insert(modules, location, module), #(alias, module.location))
     }),
   )
   let imports = dict.from_list(imports)
