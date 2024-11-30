@@ -853,7 +853,7 @@ pub fn type_infer_block_test() {
         analysis.Fn(analysis.FunctionType([], analysis.int_type), [], [
           analysis.Assignment(
             glance.Let,
-            analysis.PatternWithParams(
+            analysis.PatternWithVariables(
               analysis.PatternVariable("x"),
               dict.from_list([#("x", analysis.int_type)]),
             ),
@@ -985,7 +985,7 @@ pub fn type_infer_let_pattern_test() {
         analysis.Fn(analysis.FunctionType([], analysis.float_type), [], [
           analysis.Assignment(
             glance.Let,
-            analysis.PatternWithParams(
+            analysis.PatternWithVariables(
               analysis.PatternTuple([
                 analysis.PatternDiscard(""),
                 analysis.PatternVariable("y"),
@@ -1032,7 +1032,7 @@ pub fn type_infer_list_pattern_test() {
       context,
     )
   empty_list_pattern
-  |> should.equal(analysis.PatternWithParams(
+  |> should.equal(analysis.PatternWithVariables(
     analysis.PatternList(analysis.PatternEmpty),
     dict.new(),
   ))
@@ -1052,7 +1052,7 @@ pub fn type_infer_list_pattern_test() {
       context,
     )
   singleton_list_pattern
-  |> should.equal(analysis.PatternWithParams(
+  |> should.equal(analysis.PatternWithVariables(
     analysis.PatternList(analysis.PatternNonEmpty(
       analysis.PatternInt("42"),
       analysis.PatternEmpty,
@@ -1079,7 +1079,7 @@ pub fn type_infer_list_pattern_test() {
       context,
     )
   simple_list_pattern
-  |> should.equal(analysis.PatternWithParams(
+  |> should.equal(analysis.PatternWithVariables(
     analysis.PatternList(analysis.PatternNonEmpty(
       analysis.PatternVariable("head"),
       analysis.PatternTail(analysis.PatternVariable("tail")),
@@ -1153,7 +1153,7 @@ pub fn type_infer_constructor_pattern_test() {
     )
 
   pattern
-  |> should.equal(analysis.PatternWithParams(
+  |> should.equal(analysis.PatternWithVariables(
     analysis.PatternConstructor(my_type_id, variant_b, [
       analysis.PatternDiscard(""),
       analysis.PatternString("str_val"),
@@ -1191,7 +1191,7 @@ pub fn type_infer_constructor_pattern_test() {
     )
 
   pattern
-  |> should.equal(analysis.PatternWithParams(
+  |> should.equal(analysis.PatternWithVariables(
     analysis.PatternConstructor(my_type_id, variant_b, [
       analysis.PatternVariable("g"),
       analysis.PatternVariable("h"),
@@ -1295,7 +1295,7 @@ pub fn type_infer_field_access_test() {
         analysis.Fn(analysis.FunctionType([], my_type), [], [
           analysis.Assignment(
             glance.Let,
-            analysis.PatternWithParams(
+            analysis.PatternWithVariables(
               analysis.PatternVariable("record"),
               dict.from_list([#("record", my_type)]),
             ),
@@ -1317,6 +1317,97 @@ pub fn type_infer_field_access_test() {
       ),
     ),
   )
+}
+
+pub fn case_expr_inference_test() {
+  // Two subjects, one clause
+  glance.Case([glance.Int("42"), glance.Float("3.1")], [
+    glance.Clause(
+      [[glance.PatternVariable("n"), glance.PatternDiscard("x")]],
+      None,
+      glance.Variable("n"),
+    ),
+  ])
+  |> analysis.infer(empty_module_internals("foo", "bar"))
+  |> should.equal(
+    Ok(
+      analysis.Case(
+        analysis.int_type,
+        [analysis.Int("42"), analysis.Float("3.1")],
+        [
+          analysis.Clause(
+            [[analysis.PatternVariable("n"), analysis.PatternDiscard("x")]],
+            dict.from_list([#("n", analysis.int_type)]),
+            analysis.Call(
+              analysis.FunctionReference(
+                analysis.FunctionType([], analysis.bool_type),
+                analysis.BuiltInFunction(analysis.BoolConstructor(True)),
+              ),
+              [],
+            ),
+            analysis.Variable(analysis.int_type, "n"),
+          ),
+        ],
+      ),
+    ),
+  )
+
+  // Test with two clauses and a guard
+  glance.Case([glance.Int("42"), glance.Int("13")], [
+    glance.Clause(
+      [[glance.PatternVariable("n"), glance.PatternDiscard("m")]],
+      Some(glance.BinaryOperator(
+        glance.GtInt,
+        glance.Variable("n"),
+        glance.Int("31"),
+      )),
+      glance.Variable("n"),
+    ),
+    glance.Clause(
+      [[glance.PatternDiscard("n"), glance.PatternVariable("m")]],
+      None,
+      glance.Variable("m"),
+    ),
+  ])
+  |> analysis.infer(empty_module_internals("foo", "bar"))
+  |> should.equal(
+    Ok(
+      analysis.Case(
+        analysis.int_type,
+        [analysis.Int("42"), analysis.Int("13")],
+        [
+          analysis.Clause(
+            [[analysis.PatternVariable("n"), analysis.PatternDiscard("m")]],
+            dict.from_list([#("n", analysis.int_type)]),
+            analysis.Call(
+              analysis.FunctionReference(
+                analysis.FunctionType(
+                  [analysis.int_type, analysis.int_type],
+                  analysis.bool_type,
+                ),
+                analysis.BuiltInFunction(analysis.BinaryOperator(glance.GtInt)),
+              ),
+              [analysis.Variable(analysis.int_type, "n"), analysis.Int("31")],
+            ),
+            analysis.Variable(analysis.int_type, "n"),
+          ),
+          analysis.Clause(
+            [[analysis.PatternDiscard("n"), analysis.PatternVariable("m")]],
+            dict.from_list([#("m", analysis.int_type)]),
+            analysis.Call(
+              analysis.FunctionReference(
+                analysis.FunctionType([], analysis.bool_type),
+                analysis.BuiltInFunction(analysis.BoolConstructor(True)),
+              ),
+              [],
+            ),
+            analysis.Variable(analysis.int_type, "m"),
+          ),
+        ],
+      ),
+    ),
+  )
+  // TODO: test with alternative patterns
 }
 
 pub fn list_inference_test() {
