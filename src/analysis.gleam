@@ -14,7 +14,12 @@ import gleam/string
 import pprint
 import project.{type ModuleId, type Project}
 
-// TODO: use where appropriate
+// TODO: next steps?
+// - complete inference for all expression types
+// - constructors for results: Ok, Error
+// - inference for mutually recursive functions? call graph analysis?
+// - constants
+
 fn try_map_fold(
   over list: List(a),
   from initial: b,
@@ -30,13 +35,6 @@ fn try_map_fold(
   })
   |> result.map(pair.map_second(_, list.reverse))
 }
-
-// TODO: next steps?
-// - complete inference for all expression types
-// - constructors for results: Ok, Error
-// - pattern matching
-// - inference for mutually recursive functions? call graph analysis?
-// - constants
 
 pub type BuiltInType {
   NilType
@@ -77,11 +75,27 @@ pub type FunctionId {
 // fully resolved types
 
 pub type CustomType {
-  CustomType(parameters: List(String), opaque_: Bool, variants: List(Variant))
+  CustomType(
+    parameters: List(String),
+    opaque_: Bool,
+    variants: List(Labeled(FunctionSignature)),
+  )
 }
 
 pub type GenericType {
   GenericType(typ: Type, parameters: List(String))
+}
+
+pub type Labeled(a) {
+  Labeled(label: String, item: a)
+}
+
+pub type FunctionSignature {
+  FunctionSignature(
+    positional_parameters: List(Type),
+    labeled_parameters: List(Labeled(Type)),
+    return: Type,
+  )
 }
 
 pub type Type {
@@ -89,6 +103,11 @@ pub type Type {
   // TODO: make TypeConstructor? (Add a TypeId constructor FunctionType(arity))
   FunctionType(parameters: List(Type), return: Type)
   TypeVariable(name: String)
+}
+
+pub fn signature_type(signature: FunctionSignature) -> Type {
+  let FunctionSignature(pos, lab, ret) = signature
+  FunctionType(list.append(pos, list.map(lab, fn(l) { l.item })), ret)
 }
 
 pub const nil_type = TypeConstructor(BuiltInType(NilType), [])
@@ -103,10 +122,6 @@ pub const string_type = TypeConstructor(BuiltInType(StringType), [])
 
 pub fn list_type(item_type: Type) {
   TypeConstructor(BuiltInType(ListType), [item_type])
-}
-
-pub type Variant {
-  Variant(name: String, fields: List(Field(Type)))
 }
 
 pub type Field(t) {
@@ -125,8 +140,7 @@ pub type Module {
     imports: Dict(String, ModuleId),
     types: Dict(String, GenericType),
     custom_types: Dict(String, CustomType),
-    // TODO: functions require more meta-data than just Type -- arg labels at least
-    functions: Dict(String, Type),
+    functions: Dict(String, FunctionSignature),
   )
 }
 
@@ -189,7 +203,7 @@ pub type Pattern {
   /// Variant constructor. Normalized to use positional arguments. Any unspecified fields are represented by `PatternDiscard("")`.
   PatternConstructor(
     custom_type: TypeId,
-    variant: Variant,
+    variant: Labeled(FunctionSignature),
     arguments: List(Pattern),
   )
 }
@@ -309,39 +323,44 @@ pub fn init_inference_block(
   |> result.map(pair.map_second(_, list.reverse))
 }
 
-fn is_positional_arg(arg: Field(a)) -> Bool {
+fn is_positional_param(arg: glance.Field(a)) -> Bool {
   option.is_none(arg.label)
-}
-
-fn field_label(field: Field(a)) -> Option(String) {
-  field.label
 }
 
 // TODO: find all the places this should be used!
 pub fn pair_args(
-  expected params: List(Field(a)),
-  actual args: List(Field(b)),
+  expected signature: FunctionSignature,
+  actual args: List(glance.Field(b)),
   at location: compiler.ErrorLocation,
-) -> Result(List(#(a, Option(b))), CompilerError) {
+) -> Result(List(#(Type, Option(b))), CompilerError) {
   // Number of arguments provided may not exceed the expected
+  let n_params =
+    list.length(signature.positional_parameters)
+    + list.length(signature.labeled_parameters)
   use <- bool.guard(
-    list.length(params) < list.length(args),
-    Error(compiler.ArityError(location, list.length(params), list.length(args))),
+    n_params < list.length(args),
+    Error(compiler.ArityError(location, n_params, list.length(args))),
   )
-  let #(pos_args, label_args) = list.split_while(args, is_positional_arg)
+  let #(pos_args, label_args) = list.split_while(args, is_positional_param)
   // Positional arguments are not allowed after labeled arguments
   use <- bool.guard(
-    list.any(label_args, is_positional_arg),
+    list.any(label_args, is_positional_param),
     Error(compiler.PositionalArgsAfterLabeledArgsError(location)),
   )
+  let params =
+    list.append(
+      signature.positional_parameters |> list.map(Field(None, _)),
+      signature.labeled_parameters
+        |> list.map(fn(e) { Field(Some(e.label), e.item) }),
+    )
   let #(pos_params, label_params) = list.split(params, list.length(pos_args))
   // TODO: check labeled arguments are unique
   //
   // Actual labeled arguments must be expected
   let unexpected_arg =
     set.difference(
-      list.map(label_args, field_label) |> set.from_list,
-      list.map(label_params, field_label) |> set.from_list,
+      list.map(label_args, fn(field) { field.label }) |> set.from_list,
+      list.map(label_params, fn(field) { field.label }) |> set.from_list,
     )
     |> set.to_list
     |> list.first
@@ -364,7 +383,7 @@ pub fn pair_args(
   list.append(pos_pairs, label_pairs)
   |> list.map(fn(pair) {
     case pair {
-      #(Field(item: a, ..), Some(Field(item: b, ..))) -> #(a, Some(b))
+      #(Field(item: a, ..), Some(glance.Field(item: b, ..))) -> #(a, Some(b))
       #(Field(item: a, ..), None) -> #(a, None)
     }
   })
@@ -578,22 +597,23 @@ pub fn init_inference_pattern(
           })
       })
       // find the constructor & related types
-      use #(context, type_name, param_types, constructed_type) <- result.try(case
+      use #(context, type_name, signature, constructed_type) <- result.try(case
         dict.get(functions, constructor_name)
       {
-        Ok(t) -> {
-          case replace_free_type_variables(t, context) {
+        Ok(signature) -> {
+          case signature_replace_free_type_variables(signature, context) {
             #(
               context,
-              FunctionType(
-                param_types,
+              FunctionSignature(
+                _pos_params,
+                _lab_params,
                 TypeConstructor(
                   TypeFromModule(_module, custom_type_name),
                   _type_params,
                 ) as constructed_type,
-              ),
+              ) as signature,
             ) -> {
-              Ok(#(context, custom_type_name, param_types, constructed_type))
+              Ok(#(context, custom_type_name, signature, constructed_type))
             }
             _ -> Error(compiler.AnotherTypeError("Unexpected constructor type"))
           }
@@ -607,19 +627,14 @@ pub fn init_inference_pattern(
       )
       use variant <- result.try(
         list.find(custom_type.variants, fn(variant) {
-          variant.name == constructor_name
+          variant.label == constructor_name
         })
         |> result.replace_error(compiler.ReferenceError(constructor_name)),
       )
-      // apply type variable substitution to variant fields
-      let expected_fields =
-        list.map2(variant.fields, param_types, fn(field, type_) {
-          Field(field.label, type_)
-        })
       // pair up arguments
       use arg_pairs <- result.try(pair_args(
-        expected: expected_fields,
-        actual: args |> list.map(fn(field) { Field(field.label, field.item) }),
+        expected: signature,
+        actual: args,
         at: compiler.AtPattern(pattern),
       ))
       use <- bool.guard(
@@ -810,7 +825,6 @@ pub fn init_inference_clause(
   environment: Dict(String, Type),
   context: Context,
 ) -> Result(#(Context, Clause), CompilerError) {
-  // TODO: extract function
   let glance.Clause(alternative_patterns, guard, body) = clause
   // a clause can have one or more alternative sets of patterns
   use #(context, alternative_patterns) <- result.try(
@@ -922,9 +936,9 @@ pub fn init_inference(
       )
       dict.get(context.internals.functions, name)
       |> result.replace_error(compiler.ReferenceError(name))
-      |> result.map(fn(function_type) {
+      |> result.map(fn(signature) {
         let #(context, function_type) =
-          replace_free_type_variables(function_type, context)
+          replace_free_type_variables(signature_type(signature), context)
         #(
           add_constraint(context, Equal(expected_type, function_type)),
           FunctionReference(
@@ -1038,7 +1052,7 @@ pub fn init_inference(
         Fn(fn_type, list.map(args, fn(arg) { arg.name }), body),
       )
     }
-    glance.RecordUpdate(maybe_module, constructor, record, fields) -> {
+    glance.RecordUpdate(maybe_module, constructor_name, record, fields) -> {
       // get the constructors and custom types for the module
       use #(functions, custom_types) <- result.try(
         case maybe_module {
@@ -1054,74 +1068,65 @@ pub fn init_inference(
         |> result.replace_error(compiler.AnotherTypeError("Module not found")),
       )
       // identify the custom type and variant used
-      use #(module_id, custom_type, variant) <- result.try(case
-        dict.get(functions, constructor)
+      // TODO: shouldn't be necessary to look up the variant anymore
+      use #(module_id, custom_type, signature) <- result.try(case
+        dict.get(functions, constructor_name)
       {
-        Ok(FunctionType(
-          _params,
-          TypeConstructor(TypeFromModule(module_id, type_name), _) as return_type,
-        )) -> {
-          dict.get(custom_types, type_name)
-          |> result.try(fn(custom_type) {
-            list.find(custom_type.variants, fn(variant) {
-              variant.name == constructor
-            })
-            |> result.map(fn(variant) { #(module_id, return_type, variant) })
-          })
-          |> result.replace_error(compiler.AnotherTypeError("Variant not found"))
+        Ok(
+          FunctionSignature(
+            _pos,
+            _lab,
+            TypeConstructor(TypeFromModule(module_id, type_name), _) as return_type,
+          ) as signature,
+        ) -> {
+          Ok(#(module_id, return_type, signature))
         }
         _ -> Error(compiler.AnotherTypeError("Unexpected constructor type"))
       })
       // TODO: check all fields that are attempted to be set, exist
       // TODO: check that the variant has any record fields
       //
+      let fields =
+        list.map(fields, fn(field) {
+          let #(name, expr) = field
+          glance.Field(Some(name), expr)
+        })
       // map variant fields to either how they are set in the record update, or their existing value
-      use #(context, args) <- result.try(
-        list.index_map(variant.fields, fn(field, index) { #(index, field) })
-        |> try_map_fold(from: context, with: fn(context, pair) {
-          let #(index, field) = pair
-          case field {
-            Field(Some(label), field_type) ->
-              case list.find(fields, fn(pair) { pair.0 == label }) {
-                Ok(#(_, expr)) ->
-                  init_inference(expr, field_type, environment, context)
-                Error(Nil) ->
-                  // TODO: generate None for common fields?
-                  init_inference_call_builtin(
-                    AccessField(Some(variant.name), ByLabel(label)),
-                    [record],
-                    field_type,
-                    environment,
-                    context,
-                  )
-              }
-            Field(None, field_type) ->
-              // TODO: may not be right, what if a positional argument is provided
-              init_inference_call_builtin(
-                AccessField(Some(variant.name), ByPosition(index)),
-                [record],
-                field_type,
-                environment,
-                context,
-              )
-          }
-        }),
+      use #(context, args) <- result.map(
+        pair_args(signature, fields, compiler.AtExpression(expr))
+        |> result.map(list.index_map(_, fn(v, i) { #(i, v) }))
+        |> result.try(try_map_fold(
+          over: _,
+          from: context,
+          with: fn(context, arg) {
+            let #(pos, #(field_type, maybe_expr)) = arg
+            // TODO: make the function name part of FunctionSignature due to unqualified imports
+            case maybe_expr {
+              None ->
+                init_inference_call_builtin(
+                  AccessField(Some(constructor_name), ByPosition(pos)),
+                  [record],
+                  field_type,
+                  environment,
+                  context,
+                )
+              Some(expr) ->
+                init_inference(expr, field_type, environment, context)
+            }
+          },
+        )),
       )
       // now call the constructor
-      dict.get(functions, variant.name)
-      |> result.replace_error(compiler.AnotherTypeError("Constructor not found"))
-      |> result.map(fn(constructor_type) {
-        #(
-          add_constraint(context, Equal(expected_type, custom_type)),
-          Call(
-            FunctionReference(
-              constructor_type,
-              FunctionFromModule(module_id, variant.name),
-            ),
-            args,
+      #(
+        add_constraint(context, Equal(expected_type, custom_type)),
+        Call(
+          FunctionReference(
+            signature_type(signature),
+            FunctionFromModule(module_id, constructor_name),
           ),
-        )
-      })
+          args,
+        ),
+      )
     }
     glance.FieldAccess(container, label) -> {
       // short-cut module field access if possible
@@ -1134,9 +1139,9 @@ pub fn init_inference(
       |> result.try(dict.get(context.internals.imports, _))
       |> result.try(fn(module) {
         dict.get(module.functions, label)
-        |> result.map(fn(function_type) {
+        |> result.map(fn(signature) {
           let #(context, function_type) =
-            replace_free_type_variables(function_type, context)
+            replace_free_type_variables(signature_type(signature), context)
           #(
             add_constraint(context, Equal(expected_type, function_type)),
             FunctionReference(
@@ -1402,11 +1407,8 @@ pub fn solve_constraints(
         )
         // TODO: add fields as an attribute of custom types
         list.try_map(custom_type.variants, fn(variant) {
-          list.find(variant.fields, fn(field) {
-            case field {
-              Field(label: Some(label), ..) -> label == field_name
-              _ -> False
-            }
+          list.find(variant.item.labeled_parameters, fn(field) {
+            field.label == field_name
           })
         })
         |> result.replace_error(compiler.AnotherTypeError(
@@ -1463,6 +1465,32 @@ pub fn solve_constraints(
   |> result.map(fn(context) { context.substitution })
 }
 
+pub fn signature_find_free_type_variables(s: FunctionSignature) -> List(String) {
+  [
+    find_free_type_variables(s.return),
+    ..list.append(
+      list.map(s.positional_parameters, find_free_type_variables),
+      list.map(s.labeled_parameters, fn(e) { find_free_type_variables(e.item) }),
+    )
+  ]
+  |> list.fold(from: [], with: list.append)
+}
+
+pub fn signature_replace_free_type_variables(
+  s: FunctionSignature,
+  context: Context,
+) -> #(Context, FunctionSignature) {
+  let #(context, substitution) =
+    signature_find_free_type_variables(s)
+    |> list.unique
+    |> list.map_fold(from: context, with: fn(context, name) {
+      let #(context, var) = fresh_type_variable(context)
+      #(context, #(name, var))
+    })
+    |> pair.map_second(dict.from_list)
+  #(context, substitute_signature(s, substitution))
+}
+
 pub fn find_free_type_variables(t: Type) -> List(String) {
   case t {
     FunctionType(params, return) ->
@@ -1508,6 +1536,19 @@ pub fn substitute(t: Type, subs: Dict(String, Type)) -> Type {
         }
       }
   }
+}
+
+pub fn substitute_signature(
+  s: FunctionSignature,
+  subs: Dict(String, Type),
+) -> FunctionSignature {
+  FunctionSignature(
+    list.map(s.positional_parameters, substitute(_, subs)),
+    list.map(s.labeled_parameters, fn(e) {
+      Labeled(e.label, substitute(e.item, subs))
+    }),
+    substitute(s.return, subs),
+  )
 }
 
 pub fn substitute_statement_list(
@@ -1639,7 +1680,7 @@ pub type ModuleInternals {
     imports: Dict(String, Module),
     types: Dict(String, GenericType),
     custom_types: Dict(String, CustomType),
-    functions: Dict(String, Type),
+    functions: Dict(String, FunctionSignature),
   )
 }
 
@@ -1754,9 +1795,9 @@ pub fn resolve_type(
 fn resolve_variant_field(
   data: ModuleInternals,
   parameters: set.Set(String),
-  field: glance.Field(glance.Type),
-) -> Result(Field(Type), CompilerError) {
-  resolve_type(data, field.item)
+  field_type: glance.Type,
+) -> Result(Type, CompilerError) {
+  resolve_type(data, field_type)
   |> result.try(fn(t) {
     let undeclared =
       find_type_variables(t) |> set.difference(parameters) |> set.to_list
@@ -1765,27 +1806,56 @@ fn resolve_variant_field(
       [u, ..] -> Error(compiler.ReferenceError(u))
     }
   })
-  |> result.map(Field(field.label, _))
 }
 
 fn resolve_variant(
   data: ModuleInternals,
   parameters: set.Set(String),
   variant: glance.Variant,
-) -> Result(Variant, CompilerError) {
-  list.map(variant.fields, resolve_variant_field(data, parameters, _))
-  |> result.all
-  |> result.map(Variant(variant.name, _))
+  return_type: Type,
+) -> Result(Labeled(FunctionSignature), CompilerError) {
+  let #(pos_params, label_params) =
+    list.split_while(variant.fields, is_positional_param)
+  // Positional arguments are not allowed after labeled arguments
+  use <- bool.guard(
+    list.any(label_params, is_positional_param),
+    Error(compiler.AnotherTypeError(
+      "Constructor has positional params after labeled params",
+    )),
+    // TODO: Error(compiler.PositionalArgsAfterLabeledArgsError(location)),
+  )
+  use pos_params <- result.try(
+    list.try_map(pos_params, fn(field) {
+      resolve_variant_field(data, parameters, field.item)
+    }),
+  )
+  use label_params <- result.map(
+    list.try_map(label_params, fn(field) {
+      let assert Some(name) = field.label
+      resolve_variant_field(data, parameters, field.item)
+      |> result.map(Labeled(name, _))
+    }),
+  )
+  Labeled(
+    variant.name,
+    FunctionSignature(pos_params, label_params, return_type),
+  )
 }
 
 pub fn resolve_custom_type(
   data: ModuleInternals,
   parsed: glance.Definition(glance.CustomType),
 ) -> Result(#(String, CustomType), CompilerError) {
+  let type_id =
+    TypeConstructor(
+      TypeFromModule(data.location, parsed.definition.name),
+      parsed.definition.parameters |> list.map(TypeVariable),
+    )
   list.map(parsed.definition.variants, resolve_variant(
     data,
     set.from_list(parsed.definition.parameters),
     _,
+    type_id,
   ))
   |> result.all
   |> result.map(CustomType(
@@ -1968,7 +2038,8 @@ fn analyze_high_level(
     |> list.try_map(infer_function(internals, _))
     |> result.map(list.map(_, fn(fndef) {
       let assert #(name, Fn(typ: t, ..)) = fndef
-      #(name, t)
+      let assert FunctionType(params, return) = t
+      #(name, FunctionSignature(params, [], return))
     }))
     |> result.map(dict.from_list),
   )

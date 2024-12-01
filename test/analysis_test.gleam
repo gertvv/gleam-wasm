@@ -2,6 +2,7 @@ import analysis
 import compiler
 import glance
 import gleam/dict
+import gleam/list
 import gleam/option.{None, Some}
 import gleam/pair
 import gleam/result
@@ -27,12 +28,22 @@ fn empty_module_internals(package_name, module_path) {
 
 pub fn pair_args_test() {
   let at = compiler.AtExpression(glance.String("boo"))
-  let named = fn(str, val) { analysis.Field(Some(str), val) }
-  let positional = fn(val) { analysis.Field(None, val) }
+  let named = fn(str, val) { glance.Field(Some(str), val) }
+  let positional = fn(val) { glance.Field(None, val) }
+  let signature = fn(pos, lab) {
+    analysis.FunctionSignature(
+      list.map(pos, analysis.TypeVariable),
+      list.map(lab, fn(name) {
+        analysis.Labeled(name, analysis.TypeVariable(name))
+      }),
+      analysis.int_type,
+    )
+  }
+  let tv = analysis.TypeVariable
 
   // More actual than expected should error
   analysis.pair_args(
-    expected: [positional("a")],
+    expected: signature(["a"], []),
     actual: [positional("b"), positional("c")],
     at:,
   )
@@ -40,23 +51,23 @@ pub fn pair_args_test() {
 
   // Fewer actual than expected returns None
   analysis.pair_args(
-    expected: [positional("a"), positional("b")],
+    expected: signature(["a", "b"], []),
     actual: [positional("c")],
     at:,
   )
-  |> should.equal(Ok([#("a", Some("c")), #("b", None)]))
+  |> should.equal(Ok([#(tv("a"), Some("c")), #(tv("b"), None)]))
 
   // Labeled args may be provided as positional
   analysis.pair_args(
-    expected: [named("a", "a"), named("b", "b")],
+    expected: signature([], ["a", "b"]),
     actual: [positional("c"), positional("d")],
     at:,
   )
-  |> should.equal(Ok([#("a", Some("c")), #("b", Some("d"))]))
+  |> should.equal(Ok([#(tv("a"), Some("c")), #(tv("b"), Some("d"))]))
 
   // Positional args after labeled not allowed
   analysis.pair_args(
-    expected: [named("a", "a"), named("b", "b")],
+    expected: signature([], ["a", "b"]),
     actual: [named("a", "c"), positional("d")],
     at:,
   )
@@ -64,7 +75,7 @@ pub fn pair_args_test() {
 
   // Unexpected labeled args not allowed
   analysis.pair_args(
-    expected: [named("a", "a"), named("b", "b")],
+    expected: signature([], ["a", "b"]),
     actual: [named("c", "c")],
     at:,
   )
@@ -72,11 +83,11 @@ pub fn pair_args_test() {
 
   // Labeled args should get paired
   analysis.pair_args(
-    expected: [named("a", "a"), named("b", "b")],
+    expected: signature([], ["a", "b"]),
     actual: [named("b", "c"), named("a", "d")],
     at:,
   )
-  |> should.equal(Ok([#("a", Some("d")), #("b", Some("c"))]))
+  |> should.equal(Ok([#(tv("a"), Some("d")), #(tv("b"), Some("c"))]))
 }
 
 pub fn resolve_basic_types_test() {
@@ -191,26 +202,35 @@ pub fn resolve_dependent_custom_types_test() {
   )
   |> should.equal(Ok(#(dict.new(), dict.new())))
 
+  let type_a_id = analysis.TypeFromModule(location, "TypeA")
+  let type_b_id = analysis.TypeFromModule(location, "TypeB")
+
   let b_depends_on_a =
     dict.from_list([
       #(
         "TypeA",
         analysis.CustomType([], False, [
-          analysis.Variant("TypeA", [analysis.Field(None, analysis.int_type)]),
+          analysis.Labeled(
+            "TypeA",
+            analysis.FunctionSignature(
+              [analysis.int_type],
+              [],
+              analysis.TypeConstructor(type_a_id, []),
+            ),
+          ),
         ]),
       ),
       #(
         "TypeB",
         analysis.CustomType([], False, [
-          analysis.Variant("TypeB", [
-            analysis.Field(
-              None,
-              analysis.TypeConstructor(
-                analysis.TypeFromModule(location, "TypeA"),
-                [],
-              ),
+          analysis.Labeled(
+            "TypeB",
+            analysis.FunctionSignature(
+              [analysis.TypeConstructor(type_a_id, [])],
+              [],
+              analysis.TypeConstructor(type_b_id, []),
             ),
-          ]),
+          ),
         ]),
       ),
     ])
@@ -277,6 +297,9 @@ pub fn resolve_dependent_custom_types_test() {
   |> result.map(fn(r) { r.1 })
   |> should.equal(Ok(b_depends_on_a))
 
+  let tree_type =
+    analysis.TypeConstructor(analysis.TypeFromModule(location, "Tree"), [])
+
   analysis.resolve_types(
     project,
     location,
@@ -308,23 +331,21 @@ pub fn resolve_dependent_custom_types_test() {
         #(
           "Tree",
           analysis.CustomType([], False, [
-            analysis.Variant("Node", [
-              analysis.Field(
-                Some("left"),
-                analysis.TypeConstructor(
-                  analysis.TypeFromModule(location, "Tree"),
-                  [],
-                ),
+            analysis.Labeled(
+              "Node",
+              analysis.FunctionSignature(
+                [],
+                [
+                  analysis.Labeled("left", tree_type),
+                  analysis.Labeled("right", tree_type),
+                ],
+                tree_type,
               ),
-              analysis.Field(
-                Some("right"),
-                analysis.TypeConstructor(
-                  analysis.TypeFromModule(location, "Tree"),
-                  [],
-                ),
-              ),
-            ]),
-            analysis.Variant("Leaf", []),
+            ),
+            analysis.Labeled(
+              "Leaf",
+              analysis.FunctionSignature([], [], tree_type),
+            ),
           ]),
         ),
       ]),
@@ -615,7 +636,11 @@ pub fn type_infer_function_using_import_test() {
       dict.from_list([
         #(
           "to_string",
-          analysis.FunctionType([analysis.int_type], analysis.string_type),
+          analysis.FunctionSignature(
+            [analysis.int_type],
+            [],
+            analysis.string_type,
+          ),
         ),
       ]),
     )
@@ -789,7 +814,11 @@ pub fn type_infer_function_with_return_annotation_test() {
       functions: dict.from_list([
         #(
           "Some",
-          analysis.FunctionType([analysis.TypeVariable("a")], option_type),
+          analysis.FunctionSignature(
+            [analysis.TypeVariable("a")],
+            [],
+            option_type,
+          ),
         ),
       ]),
     )
@@ -950,7 +979,7 @@ pub fn type_infer_nested_generics_test() {
     analysis.ModuleInternals(
       ..empty_module_internals("foo", "bar"),
       functions: dict.from_list([
-        #("Holder", analysis.FunctionType([a], holder(a))),
+        #("Holder", analysis.FunctionSignature([a], [], holder(a))),
       ]),
     ),
   )
@@ -1108,17 +1137,41 @@ pub fn type_infer_constructor_pattern_test() {
   let my_type =
     analysis.TypeConstructor(my_type_id, [analysis.TypeVariable("a")])
   let variant_a =
-    analysis.Variant("VariantA", [analysis.Field(Some("x"), analysis.int_type)])
+    analysis.Labeled(
+      "VariantA",
+      analysis.FunctionSignature(
+        [],
+        [analysis.Labeled("x", analysis.int_type)],
+        my_type,
+      ),
+    )
   let variant_b =
-    analysis.Variant("VariantB", [
-      analysis.Field(Some("x"), analysis.int_type),
-      analysis.Field(Some("y"), analysis.TypeVariable("a")),
-    ])
+    analysis.Labeled(
+      "VariantB",
+      analysis.FunctionSignature(
+        [],
+        [
+          analysis.Labeled("x", analysis.int_type),
+          analysis.Labeled("y", analysis.TypeVariable("a")),
+        ],
+        my_type,
+      ),
+    )
   let my_type_definition =
     analysis.CustomType([], False, [variant_a, variant_b])
-  let var_b_constructor_type =
-    analysis.FunctionType(
-      [analysis.int_type, analysis.TypeVariable("a")],
+  let var_b_signature =
+    analysis.FunctionSignature(
+      [],
+      [
+        analysis.Labeled("x", analysis.int_type),
+        analysis.Labeled("y", analysis.TypeVariable("a")),
+      ],
+      my_type,
+    )
+  let var_a_signature =
+    analysis.FunctionSignature(
+      [],
+      [analysis.Labeled("x", analysis.int_type)],
       my_type,
     )
   let internals =
@@ -1129,8 +1182,8 @@ pub fn type_infer_constructor_pattern_test() {
       types: dict.from_list([#("MyType", analysis.GenericType(my_type, []))]),
       custom_types: dict.from_list([#("MyType", my_type_definition)]),
       functions: dict.from_list([
-        #("VariantA", analysis.FunctionType([analysis.int_type], my_type)),
-        #("VariantB", var_b_constructor_type),
+        #("VariantA", var_a_signature),
+        #("VariantB", var_b_signature),
       ]),
     )
 
@@ -1209,16 +1262,41 @@ pub fn type_infer_field_access_test() {
     analysis.TypeConstructor(analysis.TypeFromModule(module_id, "MyType"), [])
   let my_type_definition =
     analysis.CustomType([], False, [
-      analysis.Variant("VariantA", [
-        analysis.Field(Some("a"), analysis.int_type),
-      ]),
-      analysis.Variant("VariantB", [
-        analysis.Field(Some("a"), analysis.int_type),
-        analysis.Field(Some("b"), analysis.float_type),
-      ]),
+      analysis.Labeled(
+        "VariantA",
+        analysis.FunctionSignature(
+          [],
+          [analysis.Labeled("a", analysis.int_type)],
+          my_type,
+        ),
+      ),
+      analysis.Labeled(
+        "VariantA",
+        analysis.FunctionSignature(
+          [],
+          [
+            analysis.Labeled("a", analysis.int_type),
+            analysis.Labeled("b", analysis.float_type),
+          ],
+          my_type,
+        ),
+      ),
     ])
-  let var_b_constructor_type =
-    analysis.FunctionType([analysis.int_type, analysis.float_type], my_type)
+  let var_a_signature =
+    analysis.FunctionSignature(
+      [],
+      [analysis.Labeled("a", analysis.int_type)],
+      my_type,
+    )
+  let var_b_signature =
+    analysis.FunctionSignature(
+      [],
+      [
+        analysis.Labeled("a", analysis.int_type),
+        analysis.Labeled("b", analysis.float_type),
+      ],
+      my_type,
+    )
   let access_field_a =
     analysis.FunctionReference(
       analysis.FunctionType([my_type], analysis.int_type),
@@ -1232,8 +1310,8 @@ pub fn type_infer_field_access_test() {
       types: dict.from_list([#("MyType", analysis.GenericType(my_type, []))]),
       custom_types: dict.from_list([#("MyType", my_type_definition)]),
       functions: dict.from_list([
-        #("VariantA", analysis.FunctionType([analysis.int_type], my_type)),
-        #("VariantB", var_b_constructor_type),
+        #("VariantA", var_a_signature),
+        #("VariantB", var_b_signature),
       ]),
     )
   glance.FieldAccess(
@@ -1269,7 +1347,7 @@ pub fn type_infer_field_access_test() {
     )
   let variant_b_constructor =
     analysis.FunctionReference(
-      var_b_constructor_type,
+      analysis.signature_type(var_b_signature),
       analysis.FunctionFromModule(module_id, "VariantB"),
     )
   glance.Block([
