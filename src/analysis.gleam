@@ -15,10 +15,13 @@ import pprint
 import project.{type ModuleId, type Project}
 
 // TODO: next steps?
-// - complete inference for all expression types
+// - functions with labeled args; use pair_args for function calls
 // - constructors for results: Ok, Error
+// - qualified imports
+// - identify which variables a closure captures from its environment
 // - inference for mutually recursive functions? call graph analysis?
 // - constants
+// - complete inference for all expression types
 
 fn try_map_fold(
   over list: List(a),
@@ -223,7 +226,12 @@ pub type Statement {
 
 pub type Constraint {
   Equal(a: Type, b: Type)
-  HasFieldOfType(container_type: Type, field: FieldIndex, field_type: Type)
+  HasFieldOfType(
+    container_type: Type,
+    variant: Option(String),
+    field: FieldIndex,
+    field_type: Type,
+  )
 }
 
 pub type Context {
@@ -388,6 +396,48 @@ pub fn pair_args(
     }
   })
   |> Ok
+}
+
+fn module_from_internals(internals: ModuleInternals) -> Module {
+  Module(
+    internals.location,
+    dict.map_values(internals.imports, fn(_, m) { m.location }),
+    internals.types,
+    internals.custom_types,
+    internals.functions,
+  )
+}
+
+fn find_module_by_name(
+  internals: ModuleInternals,
+  maybe_module_name: Option(String),
+) -> Result(Module, compiler.CompilerError) {
+  case maybe_module_name {
+    None -> Ok(module_from_internals(internals))
+    Some(module_name) -> lookup(internals.imports, module_name)
+  }
+}
+
+fn find_module_by_id(
+  internals: ModuleInternals,
+  module_id: ModuleId,
+) -> Result(Module, compiler.CompilerError) {
+  dict.values(internals.imports)
+  |> list.find(fn(module) { module.location == module_id })
+  |> result.lazy_or(fn() {
+    case internals.location == module_id {
+      False -> Error(Nil)
+      True -> Ok(module_from_internals(internals))
+    }
+  })
+  |> result.replace_error(compiler.AnotherTypeError("Could not find module"))
+}
+
+fn lookup(
+  dict: Dict(String, b),
+  key: String,
+) -> Result(b, compiler.CompilerError) {
+  dict.get(dict, key) |> result.replace_error(compiler.ReferenceError(key))
 }
 
 fn unzip_patterns_with_variables(
@@ -580,25 +630,13 @@ pub fn init_inference_pattern(
       // TODO: support unqualified constructor imports & aliased constructors
       //
       // resolve the module
-      use #(module_id, functions, custom_types) <- result.try(case
-        maybe_module_name
-      {
-        None ->
-          Ok(#(
-            context.internals.location,
-            context.internals.functions,
-            context.internals.custom_types,
-          ))
-        Some(module_name) ->
-          dict.get(context.internals.imports, module_name)
-          |> result.replace_error(compiler.ReferenceError(module_name))
-          |> result.map(fn(module) {
-            #(module.location, module.functions, module.custom_types)
-          })
-      })
+      use module <- result.try(find_module_by_name(
+        context.internals,
+        maybe_module_name,
+      ))
       // find the constructor & related types
       use #(context, type_name, signature, constructed_type) <- result.try(case
-        dict.get(functions, constructor_name)
+        dict.get(module.functions, constructor_name)
       {
         Ok(signature) -> {
           case signature_replace_free_type_variables(signature, context) {
@@ -621,10 +659,7 @@ pub fn init_inference_pattern(
         Error(Nil) -> Error(compiler.ReferenceError(constructor_name))
       })
       // get the custom type and variant
-      use custom_type <- result.try(
-        dict.get(custom_types, type_name)
-        |> result.replace_error(compiler.ReferenceError(type_name)),
-      )
+      use custom_type <- result.try(lookup(module.custom_types, type_name))
       use variant <- result.try(
         list.find(custom_type.variants, fn(variant) {
           variant.label == constructor_name
@@ -659,7 +694,7 @@ pub fn init_inference_pattern(
               let #(patterns, variables) = unzipped
               PatternWithVariables(
                 PatternConstructor(
-                  TypeFromModule(module_id, type_name),
+                  TypeFromModule(module.location, type_name),
                   variant,
                   patterns,
                 ),
@@ -777,12 +812,12 @@ fn init_inference_call_builtin(
         })
       #(context, types, TypeConstructor(BuiltInType(TupleType(arity)), types))
     }
-    AccessField(_, index) -> {
+    AccessField(maybe_variant, index) -> {
       let #(context, container_type) = fresh_type_variable(context)
       #(
         add_constraint(
           context,
-          HasFieldOfType(container_type, index, expected_type),
+          HasFieldOfType(container_type, maybe_variant, index, expected_type),
         ),
         [container_type],
         expected_type,
@@ -925,8 +960,7 @@ pub fn init_inference(
     }
     glance.Variable(name) -> {
       use <- result.lazy_or(
-        dict.get(environment, name)
-        |> result.replace_error(compiler.ReferenceError(name))
+        lookup(environment, name)
         |> result.map(fn(variable_type) {
           #(
             add_constraint(context, Equal(expected_type, variable_type)),
@@ -934,8 +968,7 @@ pub fn init_inference(
           )
         }),
       )
-      dict.get(context.internals.functions, name)
-      |> result.replace_error(compiler.ReferenceError(name))
+      lookup(context.internals.functions, name)
       |> result.map(fn(signature) {
         let #(context, function_type) =
           replace_free_type_variables(signature_type(signature), context)
@@ -1054,29 +1087,20 @@ pub fn init_inference(
     }
     glance.RecordUpdate(maybe_module, constructor_name, record, fields) -> {
       // get the constructors and custom types for the module
-      use #(functions, custom_types) <- result.try(
-        case maybe_module {
-          Some(module_name) -> {
-            dict.get(context.internals.imports, module_name)
-            |> result.map(fn(module) {
-              #(module.functions, module.custom_types)
-            })
-          }
-          None ->
-            Ok(#(context.internals.functions, context.internals.custom_types))
-        }
-        |> result.replace_error(compiler.AnotherTypeError("Module not found")),
-      )
+      use module <- result.try(find_module_by_name(
+        context.internals,
+        maybe_module,
+      ))
       // identify the custom type and variant used
       // TODO: shouldn't be necessary to look up the variant anymore
       use #(module_id, custom_type, signature) <- result.try(case
-        dict.get(functions, constructor_name)
+        dict.get(module.functions, constructor_name)
       {
         Ok(
           FunctionSignature(
             _pos,
             _lab,
-            TypeConstructor(TypeFromModule(module_id, type_name), _) as return_type,
+            TypeConstructor(TypeFromModule(module_id, _), _) as return_type,
           ) as signature,
         ) -> {
           Ok(#(module_id, return_type, signature))
@@ -1100,7 +1124,8 @@ pub fn init_inference(
           from: context,
           with: fn(context, arg) {
             let #(pos, #(field_type, maybe_expr)) = arg
-            // TODO: make the function name part of FunctionSignature due to unqualified imports
+            // TODO: make the function name part of FunctionSignature due to unqualified imports?
+            // Or add variant to the return type?
             case maybe_expr {
               None ->
                 init_inference_call_builtin(
@@ -1353,16 +1378,16 @@ pub fn solve_constraints(
   // TODO: rather than sort, probably need an iterative / recursive solve
   list.sort(context.constraints, fn(a, b) {
     case a, b {
-      Equal(_, _), HasFieldOfType(_, _, _) -> order.Lt
+      Equal(_, _), HasFieldOfType(_, _, _, _) -> order.Lt
       Equal(_, _), Equal(_, _) -> order.Eq
-      HasFieldOfType(_, _, _), HasFieldOfType(_, _, _) -> order.Eq
-      HasFieldOfType(_, _, _), Equal(_, _) -> order.Gt
+      HasFieldOfType(_, _, _, _), HasFieldOfType(_, _, _, _) -> order.Eq
+      HasFieldOfType(_, _, _, _), Equal(_, _) -> order.Gt
     }
   })
   |> list.try_fold(from: context, with: fn(context, constraint) {
     case constraint {
       Equal(a, b) -> unify(context, a, b)
-      HasFieldOfType(container_type, ByLabel(field_name), field_type) -> {
+      HasFieldOfType(container_type, _, ByLabel(field_name), field_type) -> {
         use #(module_id, type_name) <- result.try(case container_type {
           TypeConstructor(TypeFromModule(module_id, type_name), _params) ->
             Ok(#(module_id, type_name))
@@ -1389,21 +1414,9 @@ pub fn solve_constraints(
               }
             }
         })
-        // TODO: function for looking up custom types
         use custom_type <- result.try(
-          dict.values(context.internals.imports)
-          |> list.find(fn(module) { module.location == module_id })
-          |> result.map(fn(module) { module.custom_types })
-          |> result.lazy_or(fn() {
-            case context.internals.location == module_id {
-              False -> Error(Nil)
-              True -> Ok(context.internals.custom_types)
-            }
-          })
-          |> result.try(dict.get(_, type_name))
-          |> result.replace_error(compiler.AnotherTypeError(
-            "Could not find type",
-          )),
+          find_module_by_id(context.internals, module_id)
+          |> result.try(fn(module) { lookup(module.custom_types, type_name) }),
         )
         // TODO: add fields as an attribute of custom types
         list.try_map(custom_type.variants, fn(variant) {
@@ -1429,7 +1442,7 @@ pub fn solve_constraints(
         })
         |> result.try(unify(context, _, field_type))
       }
-      HasFieldOfType(container_type, ByPosition(i), field_type) -> {
+      HasFieldOfType(container_type, maybe_variant, ByPosition(i), field_type) -> {
         use tuple_params <- result.try(case container_type {
           FunctionType(_, _) ->
             Error(compiler.AnotherTypeError("Functions do not have fields"))
@@ -1446,12 +1459,47 @@ pub fn solve_constraints(
                 ))
               Some(TypeConstructor(BuiltInType(TupleType(_n)), params)) ->
                 Ok(params)
+              Some(TypeConstructor(
+                TypeFromModule(module_id, type_name),
+                _params,
+              )) -> {
+                // TODO: do I need to worry about the type params?
+                case maybe_variant {
+                  Some(variant_name) -> {
+                    find_module_by_id(context.internals, module_id)
+                    |> result.try(fn(module) {
+                      lookup(module.custom_types, type_name)
+                    })
+                    |> result.try(fn(custom_type) {
+                      list.find(custom_type.variants, fn(variant) {
+                        variant.label == variant_name
+                      })
+                      |> result.replace_error(compiler.ReferenceError(
+                        variant_name,
+                      ))
+                    })
+                    |> result.map(fn(variant) {
+                      list.append(
+                        variant.item.positional_parameters,
+                        list.map(variant.item.labeled_parameters, fn(p) {
+                          p.item
+                        }),
+                      )
+                    })
+                  }
+                  None ->
+                    Error(compiler.AnotherTypeError(
+                      "Indexing into custom type by position expects variant",
+                    ))
+                }
+              }
               Some(_) ->
                 Error(compiler.AnotherTypeError(
-                  "ByPosition not implemented for non-tuple type",
+                  "Unexpected type for ByPosition indexing",
                 ))
             }
         })
+        // TODO: obviously tuple_params no longer makes sense here
         list.split(tuple_params, i)
         |> pair.second
         |> list.first
@@ -1711,15 +1759,12 @@ pub fn resolve_type(
     glance.NamedType(name, module_option, params) -> {
       let candidate = case module_option {
         None ->
-          dict.get(data.types, name)
+          lookup(data.types, name)
           |> result.map(fn(t) { #(data.location, t) })
-          |> result.replace_error(compiler.ReferenceError(name))
         Some(module_alias) ->
-          dict.get(data.imports, module_alias)
-          |> result.replace_error(compiler.ReferenceError(module_alias))
+          lookup(data.imports, module_alias)
           |> result.try(fn(module) {
-            dict.get(module.types, name)
-            |> result.replace_error(compiler.ReferenceError(name))
+            lookup(module.types, name)
             |> result.map(fn(def) {
               #(module.location, prototype(def.parameters))
             })

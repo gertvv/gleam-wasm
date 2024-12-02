@@ -1271,7 +1271,7 @@ pub fn type_infer_field_access_test() {
         ),
       ),
       analysis.Labeled(
-        "VariantA",
+        "VariantB",
         analysis.FunctionSignature(
           [],
           [
@@ -1342,7 +1342,7 @@ pub fn type_infer_field_access_test() {
       analysis.FunctionType([my_type], analysis.int_type),
       analysis.BuiltInFunction(analysis.AccessField(
         Some("VariantB"),
-        analysis.ByLabel("a"),
+        analysis.ByPosition(0),
       )),
     )
   let variant_b_constructor =
