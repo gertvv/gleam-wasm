@@ -102,6 +102,10 @@ pub type FunctionSignature {
   )
 }
 
+pub type Function {
+  Function(name: String, signature: FunctionSignature, body: List(Statement))
+}
+
 pub type Type {
   TypeConstructor(generic_type: TypeId, assigned_types: List(Type))
   // TODO: make TypeConstructor? (Add a TypeId constructor FunctionType(arity))
@@ -1714,8 +1718,12 @@ pub fn infer(
 pub fn infer_function(
   data: ModuleInternals,
   def: glance.Definition(glance.Function),
-) -> Result(#(String, Expression), CompilerError) {
-  infer(
+) -> Result(Function, CompilerError) {
+  use #(pos_params, label_params) <- result.try(separate_positional_and_labeled(
+    def.definition.parameters
+    |> list.map(fn(param) { glance.Field(param.label, param.type_) }),
+  ))
+  use fun <- result.map(infer(
     glance.Fn(
       def.definition.parameters
         |> list.map(fn(p) { glance.FnParameter(p.name, p.type_) }),
@@ -1723,8 +1731,22 @@ pub fn infer_function(
       def.definition.body,
     ),
     data,
+  ))
+  let assert Fn(FunctionType(param_types, return_type), _names, body) = fun
+
+  let #(pos_param_types, label_param_types) =
+    list.split(param_types, list.length(pos_params))
+  // TODO: really also need param names
+  Function(
+    def.definition.name,
+    FunctionSignature(
+      pos_param_types,
+      list.zip(label_params, label_param_types)
+        |> list.map(fn(p) { Labeled({ p.0 }.label, p.1) }),
+      return_type,
+    ),
+    body,
   )
-  |> result.map(fn(expr) { #(def.definition.name, expr) })
 }
 
 fn resolve_module(
@@ -1991,6 +2013,35 @@ fn prototype_custom_type(
   }
 }
 
+fn referenced_functions_clause(clause: Clause) -> List(FunctionId) {
+  let Clause(_, _, _, body) = clause
+  referenced_functions_expr(body)
+}
+
+fn referenced_functions_expr(expr: Expression) -> List(FunctionId) {
+  case expr {
+    Call(fun, args) -> [fun, ..args] |> list.flat_map(referenced_functions_expr)
+    Case(_, subjects, clauses) ->
+      list.append(
+        subjects |> list.flat_map(referenced_functions_expr),
+        clauses |> list.flat_map(referenced_functions_clause),
+      )
+    Fn(_, _, body) -> referenced_functions(body)
+    FunctionReference(_, id) -> [id]
+    Int(_) | Float(_) | String(_) | Trap(_, _, _) | Variable(_, _) -> []
+  }
+}
+
+fn referenced_functions(statement_list: List(Statement)) -> List(FunctionId) {
+  statement_list
+  |> list.flat_map(fn(stmt) {
+    case stmt {
+      Assignment(_, _, expr) -> referenced_functions_expr(expr)
+      Expression(expr) -> referenced_functions_expr(expr)
+    }
+  })
+}
+
 pub fn resolve_types(
   project: Project,
   location: ModuleId,
@@ -2186,24 +2237,20 @@ fn analyze_high_level(
     })
     |> result.map(dict.from_list),
   )
+  // TODO: add prototypes for constructors
   let internals = ModuleInternals(..internals, functions: function_prototypes)
   // TODO: resolve constants
-  // TODO: hack!
-  //  - create function prototypes first, then run type inference
-  //  - add prototypes for constructors too
-  //  - infer_function should return a FunctionSignature as well as the analyzed function body
+  // TODO: mostly works but is order-dependent - so functions calling other functions may not resolve fully
   use functions <- result.map(
     parsed.functions
     |> list.try_map(infer_function(internals, _))
-    |> result.map(list.map(_, fn(fndef) {
-      let assert #(name, Fn(typ: t, ..)) = fndef
-      let assert FunctionType(params, return) = t
-      #(name, FunctionSignature(params, [], return))
-    }))
+    |> result.map(list.map(_, fn(fun) { #(fun.name, fun) }))
     |> result.map(dict.from_list),
   )
-  pprint.debug(functions)
-  // TODO: constructors
+
+  // TODO: call graph analysis
+  dict.map_values(functions, fn(k, v) { referenced_functions(v.body) })
+  |> pprint.debug
 
   let public_functions =
     list.map(parsed.functions, fn(fun) {
@@ -2214,9 +2261,14 @@ fn analyze_high_level(
     |> list.map(pair.first)
     |> set.from_list
 
+  // TODO: maybe not throw the function bodies away :'(
   #(
     module_from_internals(
-      ModuleInternals(..internals, functions:, public_functions:),
+      ModuleInternals(
+        ..internals,
+        functions: dict.map_values(functions, fn(_k, v) { v.signature }),
+        public_functions:,
+      ),
     ),
     modules,
   )
