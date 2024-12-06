@@ -9,13 +9,14 @@ import gleam/option.{type Option, None, Some}
 import gleam/order
 import gleam/pair
 import gleam/result
-import gleam/set
+import gleam/set.{type Set}
 import gleam/string
 import pprint
 import project.{type ModuleId, type Project}
 
 // TODO: next steps?
 // - functions with labeled args; use pair_args for function calls
+// - private types and functions
 // - constructors for results: Ok, Error
 // - qualified imports
 // - identify which variables a closure captures from its environment
@@ -108,9 +109,14 @@ pub type Type {
   TypeVariable(name: String)
 }
 
+fn flatten_params(signature: FunctionSignature) -> List(Type) {
+  let FunctionSignature(pos, lab, _ret) = signature
+  list.append(pos, list.map(lab, fn(l) { l.item }))
+}
+
 pub fn signature_type(signature: FunctionSignature) -> Type {
-  let FunctionSignature(pos, lab, ret) = signature
-  FunctionType(list.append(pos, list.map(lab, fn(l) { l.item })), ret)
+  let FunctionSignature(_pos, _lab, ret) = signature
+  FunctionType(flatten_params(signature), ret)
 }
 
 pub const nil_type = TypeConstructor(BuiltInType(NilType), [])
@@ -335,7 +341,6 @@ fn is_positional_param(arg: glance.Field(a)) -> Bool {
   option.is_none(arg.label)
 }
 
-// TODO: find all the places this should be used!
 pub fn pair_args(
   expected signature: FunctionSignature,
   actual args: List(glance.Field(b)),
@@ -398,7 +403,9 @@ pub fn pair_args(
   |> Ok
 }
 
-fn module_from_internals(internals: ModuleInternals) -> Module {
+/// Treat the `ModuleInternals` as a `Module`.
+/// Enables uniform lookup of type and function data.
+fn internals_as_module(internals: ModuleInternals) -> Module {
   Module(
     internals.location,
     dict.map_values(internals.imports, fn(_, m) { m.location }),
@@ -408,12 +415,30 @@ fn module_from_internals(internals: ModuleInternals) -> Module {
   )
 }
 
+/// Convert `ModuleInternals` to a `Module`.
+/// Removes reference to any private types and functions.
+fn module_from_internals(internals: ModuleInternals) -> Module {
+  Module(
+    internals.location,
+    dict.map_values(internals.imports, fn(_, m) { m.location }),
+    dict.filter(internals.types, fn(k, _v) {
+      set.contains(internals.public_types, k)
+    }),
+    dict.filter(internals.custom_types, fn(k, _v) {
+      set.contains(internals.public_types, k)
+    }),
+    dict.filter(internals.functions, fn(k, _v) {
+      set.contains(internals.public_functions, k)
+    }),
+  )
+}
+
 fn find_module_by_name(
   internals: ModuleInternals,
   maybe_module_name: Option(String),
 ) -> Result(Module, compiler.CompilerError) {
   case maybe_module_name {
-    None -> Ok(module_from_internals(internals))
+    None -> Ok(internals_as_module(internals))
     Some(module_name) -> lookup(internals.imports, module_name)
   }
 }
@@ -427,7 +452,7 @@ fn find_module_by_id(
   |> result.lazy_or(fn() {
     case internals.location == module_id {
       False -> Error(Nil)
-      True -> Ok(module_from_internals(internals))
+      True -> Ok(internals_as_module(internals))
     }
   })
   |> result.replace_error(compiler.AnotherTypeError("Could not find module"))
@@ -1720,7 +1745,6 @@ fn resolve_module(
   |> result.replace_error(compiler.ReferenceError(imported_module))
 }
 
-// TODO: split public_types vs private_types
 pub type ModuleInternals {
   ModuleInternals(
     project: Project,
@@ -1729,6 +1753,8 @@ pub type ModuleInternals {
     types: Dict(String, GenericType),
     custom_types: Dict(String, CustomType),
     functions: Dict(String, FunctionSignature),
+    public_types: Set(String),
+    public_functions: Set(String),
   )
 }
 
@@ -1853,31 +1879,46 @@ fn resolve_variant_field(
   })
 }
 
+fn separate_positional_and_labeled(
+  parameters: List(glance.Field(a)),
+) -> Result(#(List(a), List(Labeled(a))), compiler.CompilerError) {
+  let #(pos_params, label_params) =
+    list.split_while(parameters, is_positional_param)
+  // Positional arguments are not allowed after labeled arguments
+  use <- bool.guard(
+    list.any(label_params, is_positional_param),
+    Error(compiler.AnotherTypeError(
+      "Positional params not allowed after labeled params",
+    )),
+    // TODO: Error(compiler.PositionalArgsAfterLabeledArgsError(location)),
+  )
+  let pos_params = list.map(pos_params, fn(field) { field.item })
+  let label_params =
+    list.map(label_params, fn(field) {
+      let assert Some(name) = field.label
+      Labeled(name, field.item)
+    })
+  Ok(#(pos_params, label_params))
+}
+
 fn resolve_variant(
   data: ModuleInternals,
   parameters: set.Set(String),
   variant: glance.Variant,
   return_type: Type,
 ) -> Result(Labeled(FunctionSignature), CompilerError) {
-  let #(pos_params, label_params) =
-    list.split_while(variant.fields, is_positional_param)
-  // Positional arguments are not allowed after labeled arguments
-  use <- bool.guard(
-    list.any(label_params, is_positional_param),
-    Error(compiler.AnotherTypeError(
-      "Constructor has positional params after labeled params",
-    )),
-    // TODO: Error(compiler.PositionalArgsAfterLabeledArgsError(location)),
-  )
+  use #(pos_params, label_params) <- result.try(separate_positional_and_labeled(
+    variant.fields,
+  ))
   use pos_params <- result.try(
-    list.try_map(pos_params, fn(field) {
-      resolve_variant_field(data, parameters, field.item)
+    list.try_map(pos_params, fn(field_type) {
+      resolve_variant_field(data, parameters, field_type)
     }),
   )
   use label_params <- result.map(
-    list.try_map(label_params, fn(field) {
-      let assert Some(name) = field.label
-      resolve_variant_field(data, parameters, field.item)
+    list.try_map(label_params, fn(labeled_field) {
+      let Labeled(name, field_type) = labeled_field
+      resolve_variant_field(data, parameters, field_type)
       |> result.map(Labeled(name, _))
     }),
   )
@@ -1950,29 +1991,28 @@ fn prototype_custom_type(
   }
 }
 
-// TODO: split into one for aliases and one for custom types
 pub fn resolve_types(
   project: Project,
   location: ModuleId,
   imports: Dict(String, ModuleId),
   modules: Dict(ModuleId, Module),
   parsed: glance.Module,
-) -> Result(
-  #(Dict(String, GenericType), Dict(String, CustomType)),
-  CompilerError,
-) {
+) -> Result(ModuleInternals, CompilerError) {
+  // Create prototypes (placeholders) for all declared types
   let custom_prototypes =
     parsed.custom_types
     |> list.map(prototype_custom_type)
   let alias_prototypes = parsed.type_aliases |> list.map(prototype_type_alias)
   let prototypes =
     dict.from_list(list.append(custom_prototypes, alias_prototypes))
+  // Resolve imports
   let imported_modules =
     imports
     |> dict.map_values(fn(_, loc) {
       let assert Ok(module) = dict.get(modules, loc)
       module
     })
+  // Construct initial ModuleInternals using the prototypes
   let internals =
     ModuleInternals(
       project: project,
@@ -1981,8 +2021,11 @@ pub fn resolve_types(
       types: prototypes,
       custom_types: dict.new(),
       functions: dict.new(),
+      public_types: set.new(),
+      public_functions: set.new(),
     )
 
+  // Resolve the type definitions
   use aliases <- result.try(
     result.all(list.map(parsed.type_aliases, resolve_type_alias(internals, _))),
   )
@@ -1995,20 +2038,60 @@ pub fn resolve_types(
     result.all(list.map(parsed.custom_types, resolve_custom_type(internals, _))),
   )
 
+  // Wrap custom types for uniformity with type aliases
   let custom_types_generic =
-    dict.map_values(dict.from_list(custom_types), fn(name, custom_type) {
-      GenericType(
-        TypeConstructor(
-          TypeFromModule(location, name),
-          custom_type.parameters |> list.map(TypeVariable(_)),
-        ),
-        custom_type.parameters,
-      )
+    list.map(custom_types, fn(custom_type_def) {
+      let #(name, custom_type) = custom_type_def
+      let generic =
+        GenericType(
+          TypeConstructor(
+            TypeFromModule(location, name),
+            custom_type.parameters |> list.map(TypeVariable(_)),
+          ),
+          custom_type.parameters,
+        )
+      #(name, generic)
     })
+
   // TODO: ensure uniqueness?
-  #(
-    dict.merge(dict.from_list(aliases), custom_types_generic),
-    dict.from_list(custom_types),
+
+  // Find all the public types
+  let public_types =
+    list.append(
+      list.map(parsed.type_aliases, fn(alias) {
+        let glance.Definition(
+          definition: glance.TypeAlias(
+            name:,
+            publicity:,
+            ..,
+          ),
+          ..,
+        ) = alias
+        #(name, publicity)
+      }),
+      list.map(parsed.custom_types, fn(alias) {
+        let glance.Definition(
+          definition: glance.CustomType(
+            name:,
+            publicity:,
+            ..,
+          ),
+          ..,
+        ) = alias
+        #(name, publicity)
+      }),
+    )
+    |> list.filter(fn(pair) { pair.second(pair) == glance.Public })
+    |> list.map(pair.first)
+
+  ModuleInternals(
+    ..internals,
+    types: dict.merge(
+      dict.from_list(aliases),
+      dict.from_list(custom_types_generic),
+    ),
+    custom_types: dict.from_list(custom_types),
+    public_types: set.from_list(public_types),
   )
 }
 
@@ -2053,31 +2136,62 @@ fn analyze_high_level(
     }),
   )
   let imports = dict.from_list(imports)
-  use #(types, custom_types) <- result.try(resolve_types(
+  use internals <- result.try(resolve_types(
     project,
     location,
     imports,
     modules,
     parsed,
   ))
-  // TODO: resolve constants
-  // TODO: fix duplication of this with resolve_types
-  let imported_modules =
-    imports
-    |> dict.map_values(fn(_, loc) {
-      let assert Ok(module) = dict.get(modules, loc)
-      module
+
+  use function_prototypes <- result.try(
+    list.try_map(parsed.functions, fn(def) {
+      let context = Context(internals, dict.new(), [], 1)
+      let glance.Definition(
+        definition: glance.Function(
+          name:,
+          publicity:,
+          parameters:,
+          return:,
+          ..,
+        ),
+        ..,
+      ) = def
+      use #(pos_args, lab_args) <- result.try(
+        list.map(parameters, fn(param) {
+          let glance.FunctionParameter(label:, type_:, ..) = param
+          glance.Field(label, type_)
+        })
+        |> separate_positional_and_labeled,
+      )
+      use #(context, pos_args) <- result.try(
+        pos_args |> try_map_fold(context, resolve_optional_type),
+      )
+      use #(context, lab_args) <- result.try(
+        lab_args
+        |> try_map_fold(context, fn(context, arg) {
+          let Labeled(name, typ) = arg
+          resolve_optional_type(context, typ)
+          |> result.map(fn(res) {
+            let #(context, typ) = res
+            #(context, Labeled(name, typ))
+          })
+        }),
+      )
+      use #(_context, return) <- result.map(resolve_optional_type(
+        context,
+        return,
+      ))
+      #(name, FunctionSignature(pos_args, lab_args, return))
     })
-  let internals =
-    ModuleInternals(
-      project: project,
-      location: location,
-      imports: imported_modules,
-      types: types,
-      custom_types: dict.new(),
-      functions: dict.new(),
-    )
+    |> result.map(dict.from_list),
+  )
+  let internals = ModuleInternals(..internals, functions: function_prototypes)
+  // TODO: resolve constants
   // TODO: hack!
+  //  - create function prototypes first, then run type inference
+  //  - add prototypes for constructors too
+  //  - infer_function should return a FunctionSignature as well as the analyzed function body
   use functions <- result.map(
     parsed.functions
     |> list.try_map(infer_function(internals, _))
@@ -2088,9 +2202,24 @@ fn analyze_high_level(
     }))
     |> result.map(dict.from_list),
   )
+  pprint.debug(functions)
+  // TODO: constructors
 
-  // TODO: filter to only public parts
-  #(Module(location, imports, types, custom_types, functions), modules)
+  let public_functions =
+    list.map(parsed.functions, fn(fun) {
+      let glance.Definition(_attr, glance.Function(name:, publicity:, ..)) = fun
+      #(name, publicity)
+    })
+    |> list.filter(fn(pair) { pair.second(pair) == glance.Public })
+    |> list.map(pair.first)
+    |> set.from_list
+
+  #(
+    module_from_internals(
+      ModuleInternals(..internals, functions:, public_functions:),
+    ),
+    modules,
+  )
 }
 
 pub fn analyze_module(

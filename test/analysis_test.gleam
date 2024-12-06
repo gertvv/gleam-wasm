@@ -6,6 +6,7 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/pair
 import gleam/result
+import gleam/set
 import gleeunit/should
 import pprint
 import project
@@ -23,6 +24,8 @@ fn empty_module_internals(package_name, module_path) {
     dict.new(),
     dict.new(),
     dict.new(),
+    set.new(),
+    set.new(),
   )
 }
 
@@ -187,20 +190,22 @@ pub fn resolve_dependent_custom_types_test() {
     })
   let location = project.SourceLocation("test", "bar")
 
-  analysis.resolve_types(
-    project,
-    location,
-    dict.new(),
-    dict.new(),
-    glance.Module(
-      imports: [],
-      custom_types: [],
-      type_aliases: [],
-      constants: [],
-      functions: [],
-    ),
-  )
-  |> should.equal(Ok(#(dict.new(), dict.new())))
+  let assert Ok(internals) =
+    analysis.resolve_types(
+      project,
+      location,
+      dict.new(),
+      dict.new(),
+      glance.Module(
+        imports: [],
+        custom_types: [],
+        type_aliases: [],
+        constants: [],
+        functions: [],
+      ),
+    )
+  internals.types |> should.equal(dict.new())
+  internals.custom_types |> should.equal(dict.new())
 
   let type_a_id = analysis.TypeFromModule(location, "TypeA")
   let type_b_id = analysis.TypeFromModule(location, "TypeB")
@@ -263,7 +268,7 @@ pub fn resolve_dependent_custom_types_test() {
       functions: [],
     ),
   )
-  |> result.map(fn(r) { r.1 })
+  |> result.map(fn(r) { r.custom_types })
   |> should.equal(Ok(b_depends_on_a))
 
   analysis.resolve_types(
@@ -294,7 +299,7 @@ pub fn resolve_dependent_custom_types_test() {
       functions: [],
     ),
   )
-  |> result.map(fn(r) { r.1 })
+  |> result.map(fn(r) { r.custom_types })
   |> should.equal(Ok(b_depends_on_a))
 
   let tree_type =
@@ -324,7 +329,7 @@ pub fn resolve_dependent_custom_types_test() {
       functions: [],
     ),
   )
-  |> result.map(fn(r) { r.1 })
+  |> result.map(fn(r) { r.custom_types })
   |> should.equal(
     Ok(
       dict.from_list([
@@ -378,7 +383,7 @@ pub fn resolve_type_aliases_test() {
       functions: [],
     ),
   )
-  |> result.map(fn(r) { r.0 })
+  |> result.map(fn(r) { r.types })
   |> should.equal(
     Ok(
       dict.from_list([#("Alias", analysis.GenericType(analysis.int_type, []))]),
@@ -408,7 +413,7 @@ pub fn resolve_type_aliases_test() {
       functions: [],
     ),
   )
-  |> result.map(fn(r) { r.0 })
+  |> result.map(fn(r) { r.types })
   |> should.equal(
     Ok(
       dict.from_list([
@@ -443,7 +448,7 @@ pub fn resolve_type_aliases_test() {
       functions: [],
     ),
   )
-  |> result.map(fn(r) { r.0 })
+  |> result.map(fn(r) { r.types })
   |> should.equal(
     Ok(
       dict.from_list([
@@ -1185,6 +1190,8 @@ pub fn type_infer_constructor_pattern_test() {
         #("VariantA", var_a_signature),
         #("VariantB", var_b_signature),
       ]),
+      public_types: set.new(),
+      public_functions: set.new(),
     )
 
   let assert Ok(#(new_context, pattern)) =
@@ -1313,6 +1320,8 @@ pub fn type_infer_field_access_test() {
         #("VariantA", var_a_signature),
         #("VariantB", var_b_signature),
       ]),
+      public_types: set.new(),
+      public_functions: set.new(),
     )
   glance.FieldAccess(
     glance.Call(glance.Variable("VariantA"), [
@@ -1662,4 +1671,56 @@ pub fn fn_capture_test() {
       analysis.TypeVariable("a"),
     ),
   ])
+}
+
+pub fn infer_function_test() {
+  let tv_a = analysis.TypeVariable("a")
+  let tv_b = analysis.TypeVariable("b")
+  analysis.infer_function(
+    analysis.ModuleInternals(
+      ..empty_module_internals("foo", "bar"),
+      functions: dict.from_list([
+        #(
+          "add",
+          analysis.FunctionSignature(
+            [analysis.int_type, analysis.int_type],
+            [],
+            analysis.int_type,
+          ),
+        ),
+        #(
+          "fold",
+          analysis.FunctionSignature(
+            [
+              analysis.list_type(tv_a),
+              tv_b,
+              analysis.FunctionType([tv_b, tv_a], tv_b),
+            ],
+            [],
+            tv_b,
+          ),
+        ),
+      ]),
+    ),
+    glance.Definition(
+      [],
+      glance.Function(
+        "sum",
+        glance.Public,
+        [glance.FunctionParameter(None, glance.Named("lst"), None)],
+        None,
+        [
+          glance.Expression(
+            glance.Call(glance.Variable("fold"), [
+              glance.Field(None, glance.Variable("lst")),
+              glance.Field(None, glance.Int("0")),
+              glance.Field(None, glance.Variable("add")),
+            ]),
+          ),
+        ],
+        glance.Span(0, 1),
+      ),
+    ),
+  )
+  |> pprint.debug()
 }
