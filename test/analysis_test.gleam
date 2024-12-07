@@ -35,6 +35,7 @@ pub fn pair_args_test() {
   let positional = fn(val) { glance.Field(None, val) }
   let signature = fn(pos, lab) {
     analysis.FunctionSignature(
+      "a_function",
       list.map(pos, analysis.TypeVariable),
       list.map(lab, fn(name) {
         analysis.Labeled(name, analysis.TypeVariable(name))
@@ -215,26 +216,22 @@ pub fn resolve_dependent_custom_types_test() {
       #(
         "TypeA",
         analysis.CustomType([], False, [
-          analysis.Labeled(
+          analysis.FunctionSignature(
             "TypeA",
-            analysis.FunctionSignature(
-              [analysis.int_type],
-              [],
-              analysis.TypeConstructor(type_a_id, []),
-            ),
+            [analysis.int_type],
+            [],
+            analysis.TypeConstructor(type_a_id, []),
           ),
         ]),
       ),
       #(
         "TypeB",
         analysis.CustomType([], False, [
-          analysis.Labeled(
+          analysis.FunctionSignature(
             "TypeB",
-            analysis.FunctionSignature(
-              [analysis.TypeConstructor(type_a_id, [])],
-              [],
-              analysis.TypeConstructor(type_b_id, []),
-            ),
+            [analysis.TypeConstructor(type_a_id, [])],
+            [],
+            analysis.TypeConstructor(type_b_id, []),
           ),
         ]),
       ),
@@ -336,21 +333,16 @@ pub fn resolve_dependent_custom_types_test() {
         #(
           "Tree",
           analysis.CustomType([], False, [
-            analysis.Labeled(
+            analysis.FunctionSignature(
               "Node",
-              analysis.FunctionSignature(
-                [],
-                [
-                  analysis.Labeled("left", tree_type),
-                  analysis.Labeled("right", tree_type),
-                ],
-                tree_type,
-              ),
+              [],
+              [
+                analysis.Labeled("left", tree_type),
+                analysis.Labeled("right", tree_type),
+              ],
+              tree_type,
             ),
-            analysis.Labeled(
-              "Leaf",
-              analysis.FunctionSignature([], [], tree_type),
-            ),
+            analysis.FunctionSignature("Leaf", [], [], tree_type),
           ]),
         ),
       ]),
@@ -642,6 +634,7 @@ pub fn type_infer_function_using_import_test() {
         #(
           "to_string",
           analysis.FunctionSignature(
+            "to_string",
             [analysis.int_type],
             [],
             analysis.string_type,
@@ -820,6 +813,7 @@ pub fn type_infer_function_with_return_annotation_test() {
         #(
           "Some",
           analysis.FunctionSignature(
+            "Some",
             [analysis.TypeVariable("a")],
             [],
             option_type,
@@ -984,7 +978,7 @@ pub fn type_infer_nested_generics_test() {
     analysis.ModuleInternals(
       ..empty_module_internals("foo", "bar"),
       functions: dict.from_list([
-        #("Holder", analysis.FunctionSignature([a], [], holder(a))),
+        #("Holder", analysis.FunctionSignature("Holder", [a], [], holder(a))),
       ]),
     ),
   )
@@ -1142,30 +1136,15 @@ pub fn type_infer_constructor_pattern_test() {
   let my_type =
     analysis.TypeConstructor(my_type_id, [analysis.TypeVariable("a")])
   let variant_a =
-    analysis.Labeled(
+    analysis.FunctionSignature(
       "VariantA",
-      analysis.FunctionSignature(
-        [],
-        [analysis.Labeled("x", analysis.int_type)],
-        my_type,
-      ),
+      [],
+      [analysis.Labeled("x", analysis.int_type)],
+      my_type,
     )
   let variant_b =
-    analysis.Labeled(
-      "VariantB",
-      analysis.FunctionSignature(
-        [],
-        [
-          analysis.Labeled("x", analysis.int_type),
-          analysis.Labeled("y", analysis.TypeVariable("a")),
-        ],
-        my_type,
-      ),
-    )
-  let my_type_definition =
-    analysis.CustomType([], False, [variant_a, variant_b])
-  let var_b_signature =
     analysis.FunctionSignature(
+      "VariantB",
       [],
       [
         analysis.Labeled("x", analysis.int_type),
@@ -1173,12 +1152,8 @@ pub fn type_infer_constructor_pattern_test() {
       ],
       my_type,
     )
-  let var_a_signature =
-    analysis.FunctionSignature(
-      [],
-      [analysis.Labeled("x", analysis.int_type)],
-      my_type,
-    )
+  let my_type_definition =
+    analysis.CustomType([], False, [variant_a, variant_b])
   let internals =
     analysis.ModuleInternals(
       project: project.Project("name", dict.new(), fn(_, _) { panic }),
@@ -1187,8 +1162,8 @@ pub fn type_infer_constructor_pattern_test() {
       types: dict.from_list([#("MyType", analysis.GenericType(my_type, []))]),
       custom_types: dict.from_list([#("MyType", my_type_definition)]),
       functions: dict.from_list([
-        #("VariantA", var_a_signature),
-        #("VariantB", var_b_signature),
+        #("VariantA", variant_a),
+        #("VariantB", variant_b),
       ]),
       public_types: set.new(),
       public_functions: set.new(),
@@ -1212,9 +1187,15 @@ pub fn type_infer_constructor_pattern_test() {
       ),
     )
 
+  let variant_b_subst =
+    analysis.substitute_signature(
+      variant_b,
+      dict.from_list([#("a", analysis.TypeVariable("$2"))]),
+    )
+
   pattern
   |> should.equal(analysis.PatternWithVariables(
-    analysis.PatternConstructor(my_type_id, variant_b, [
+    analysis.PatternConstructor(my_type_id, variant_b_subst, [
       analysis.PatternDiscard(""),
       analysis.PatternString("str_val"),
     ]),
@@ -1252,7 +1233,7 @@ pub fn type_infer_constructor_pattern_test() {
 
   pattern
   |> should.equal(analysis.PatternWithVariables(
-    analysis.PatternConstructor(my_type_id, variant_b, [
+    analysis.PatternConstructor(my_type_id, variant_b_subst, [
       analysis.PatternVariable("g"),
       analysis.PatternVariable("h"),
     ]),
@@ -1267,36 +1248,16 @@ pub fn type_infer_field_access_test() {
   let module_id = project.SourceLocation("foo", "bar")
   let my_type =
     analysis.TypeConstructor(analysis.TypeFromModule(module_id, "MyType"), [])
-  let my_type_definition =
-    analysis.CustomType([], False, [
-      analysis.Labeled(
-        "VariantA",
-        analysis.FunctionSignature(
-          [],
-          [analysis.Labeled("a", analysis.int_type)],
-          my_type,
-        ),
-      ),
-      analysis.Labeled(
-        "VariantB",
-        analysis.FunctionSignature(
-          [],
-          [
-            analysis.Labeled("a", analysis.int_type),
-            analysis.Labeled("b", analysis.float_type),
-          ],
-          my_type,
-        ),
-      ),
-    ])
-  let var_a_signature =
+  let variant_a =
     analysis.FunctionSignature(
+      "VariantA",
       [],
       [analysis.Labeled("a", analysis.int_type)],
       my_type,
     )
-  let var_b_signature =
+  let variant_b =
     analysis.FunctionSignature(
+      "VariantB",
       [],
       [
         analysis.Labeled("a", analysis.int_type),
@@ -1304,6 +1265,8 @@ pub fn type_infer_field_access_test() {
       ],
       my_type,
     )
+  let my_type_definition =
+    analysis.CustomType([], False, [variant_a, variant_b])
   let access_field_a =
     analysis.FunctionReference(
       analysis.FunctionType([my_type], analysis.int_type),
@@ -1317,8 +1280,8 @@ pub fn type_infer_field_access_test() {
       types: dict.from_list([#("MyType", analysis.GenericType(my_type, []))]),
       custom_types: dict.from_list([#("MyType", my_type_definition)]),
       functions: dict.from_list([
-        #("VariantA", var_a_signature),
-        #("VariantB", var_b_signature),
+        #("VariantA", variant_a),
+        #("VariantB", variant_b),
       ]),
       public_types: set.new(),
       public_functions: set.new(),
@@ -1356,7 +1319,7 @@ pub fn type_infer_field_access_test() {
     )
   let variant_b_constructor =
     analysis.FunctionReference(
-      analysis.signature_type(var_b_signature),
+      analysis.signature_type(variant_b),
       analysis.FunctionFromModule(module_id, "VariantB"),
     )
   glance.Block([
@@ -1683,6 +1646,7 @@ pub fn infer_function_test() {
         #(
           "add",
           analysis.FunctionSignature(
+            "add",
             [analysis.int_type, analysis.int_type],
             [],
             analysis.int_type,
@@ -1691,6 +1655,7 @@ pub fn infer_function_test() {
         #(
           "fold",
           analysis.FunctionSignature(
+            "fold",
             [
               analysis.list_type(tv_a),
               tv_b,

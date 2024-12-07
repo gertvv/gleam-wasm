@@ -82,7 +82,7 @@ pub type CustomType {
   CustomType(
     parameters: List(String),
     opaque_: Bool,
-    variants: List(Labeled(FunctionSignature)),
+    variants: List(FunctionSignature),
   )
 }
 
@@ -96,6 +96,7 @@ pub type Labeled(a) {
 
 pub type FunctionSignature {
   FunctionSignature(
+    name: String,
     positional_parameters: List(Type),
     labeled_parameters: List(Labeled(Type)),
     return: Type,
@@ -103,7 +104,11 @@ pub type FunctionSignature {
 }
 
 pub type Function {
-  Function(name: String, signature: FunctionSignature, body: List(Statement))
+  Function(
+    signature: FunctionSignature,
+    argument_names: List(glance.AssignmentName),
+    body: List(Statement),
+  )
 }
 
 pub type Type {
@@ -114,12 +119,12 @@ pub type Type {
 }
 
 fn flatten_params(signature: FunctionSignature) -> List(Type) {
-  let FunctionSignature(pos, lab, _ret) = signature
+  let FunctionSignature(_name, pos, lab, _ret) = signature
   list.append(pos, list.map(lab, fn(l) { l.item }))
 }
 
 pub fn signature_type(signature: FunctionSignature) -> Type {
-  let FunctionSignature(_pos, _lab, ret) = signature
+  let FunctionSignature(_name, _pos, _lab, ret) = signature
   FunctionType(flatten_params(signature), ret)
 }
 
@@ -216,7 +221,7 @@ pub type Pattern {
   /// Variant constructor. Normalized to use positional arguments. Any unspecified fields are represented by `PatternDiscard("")`.
   PatternConstructor(
     custom_type: TypeId,
-    variant: Labeled(FunctionSignature),
+    variant: FunctionSignature,
     arguments: List(Pattern),
   )
 }
@@ -672,6 +677,7 @@ pub fn init_inference_pattern(
             #(
               context,
               FunctionSignature(
+                _name,
                 _pos_params,
                 _lab_params,
                 TypeConstructor(
@@ -687,14 +693,6 @@ pub fn init_inference_pattern(
         }
         Error(Nil) -> Error(compiler.ReferenceError(constructor_name))
       })
-      // get the custom type and variant
-      use custom_type <- result.try(lookup(module.custom_types, type_name))
-      use variant <- result.try(
-        list.find(custom_type.variants, fn(variant) {
-          variant.label == constructor_name
-        })
-        |> result.replace_error(compiler.ReferenceError(constructor_name)),
-      )
       // pair up arguments
       use arg_pairs <- result.try(pair_args(
         expected: signature,
@@ -724,7 +722,7 @@ pub fn init_inference_pattern(
               PatternWithVariables(
                 PatternConstructor(
                   TypeFromModule(module.location, type_name),
-                  variant,
+                  signature,
                   patterns,
                 ),
                 variables,
@@ -1095,13 +1093,21 @@ pub fn init_inference(
         }),
       )
 
-      // TODO: should Discarded names even be added to the environment?
+      // Populate environment with any named arguments
       let environment =
-        list.map2(args, param_types, fn(arg, typ) {
-          #(assignment_name_to_string(arg.name), typ)
+        list.zip(args, param_types)
+        |> list.filter(fn(p) {
+          case p.0 {
+            glance.FnParameter(glance.Named(_), _) -> True
+            glance.FnParameter(glance.Discarded(_), _) -> False
+          }
         })
+        |> list.map(pair.map_first(_, fn(p) {
+          assignment_name_to_string(p.name)
+        }))
         |> dict.from_list
         |> dict.merge(environment, _)
+
       use #(context, body) <- result.map(init_inference_block(
         body,
         return_type,
@@ -1121,12 +1127,12 @@ pub fn init_inference(
         maybe_module,
       ))
       // identify the custom type and variant used
-      // TODO: shouldn't be necessary to look up the variant anymore
       use #(module_id, custom_type, signature) <- result.try(case
         dict.get(module.functions, constructor_name)
       {
         Ok(
           FunctionSignature(
+            _name,
             _pos,
             _lab,
             TypeConstructor(TypeFromModule(module_id, _), _) as return_type,
@@ -1153,12 +1159,10 @@ pub fn init_inference(
           from: context,
           with: fn(context, arg) {
             let #(pos, #(field_type, maybe_expr)) = arg
-            // TODO: make the function name part of FunctionSignature due to unqualified imports?
-            // Or add variant to the return type?
             case maybe_expr {
               None ->
                 init_inference_call_builtin(
-                  AccessField(Some(constructor_name), ByPosition(pos)),
+                  AccessField(Some(signature.name), ByPosition(pos)),
                   [record],
                   field_type,
                   environment,
@@ -1449,7 +1453,7 @@ pub fn solve_constraints(
         )
         // TODO: add fields as an attribute of custom types
         list.try_map(custom_type.variants, fn(variant) {
-          list.find(variant.item.labeled_parameters, fn(field) {
+          list.find(variant.labeled_parameters, fn(field) {
             field.label == field_name
           })
         })
@@ -1501,7 +1505,7 @@ pub fn solve_constraints(
                     })
                     |> result.try(fn(custom_type) {
                       list.find(custom_type.variants, fn(variant) {
-                        variant.label == variant_name
+                        variant.name == variant_name
                       })
                       |> result.replace_error(compiler.ReferenceError(
                         variant_name,
@@ -1509,10 +1513,8 @@ pub fn solve_constraints(
                     })
                     |> result.map(fn(variant) {
                       list.append(
-                        variant.item.positional_parameters,
-                        list.map(variant.item.labeled_parameters, fn(p) {
-                          p.item
-                        }),
+                        variant.positional_parameters,
+                        list.map(variant.labeled_parameters, fn(p) { p.item }),
                       )
                     })
                   }
@@ -1620,6 +1622,7 @@ pub fn substitute_signature(
   subs: Dict(String, Type),
 ) -> FunctionSignature {
   FunctionSignature(
+    s.name,
     list.map(s.positional_parameters, substitute(_, subs)),
     list.map(s.labeled_parameters, fn(e) {
       Labeled(e.label, substitute(e.item, subs))
@@ -1719,6 +1722,7 @@ pub fn infer_function(
   data: ModuleInternals,
   def: glance.Definition(glance.Function),
 ) -> Result(Function, CompilerError) {
+  // TODO: turn into an init_inference_function that context can be passed into?
   use #(pos_params, label_params) <- result.try(separate_positional_and_labeled(
     def.definition.parameters
     |> list.map(fn(param) { glance.Field(param.label, param.type_) }),
@@ -1736,15 +1740,15 @@ pub fn infer_function(
 
   let #(pos_param_types, label_param_types) =
     list.split(param_types, list.length(pos_params))
-  // TODO: really also need param names
   Function(
-    def.definition.name,
     FunctionSignature(
+      def.definition.name,
       pos_param_types,
       list.zip(label_params, label_param_types)
         |> list.map(fn(p) { Labeled({ p.0 }.label, p.1) }),
       return_type,
     ),
+    def.definition.parameters |> list.map(fn(p) { p.name }),
     body,
   )
 }
@@ -1928,7 +1932,7 @@ fn resolve_variant(
   parameters: set.Set(String),
   variant: glance.Variant,
   return_type: Type,
-) -> Result(Labeled(FunctionSignature), CompilerError) {
+) -> Result(FunctionSignature, CompilerError) {
   use #(pos_params, label_params) <- result.try(separate_positional_and_labeled(
     variant.fields,
   ))
@@ -1944,10 +1948,7 @@ fn resolve_variant(
       |> result.map(Labeled(name, _))
     }),
   )
-  Labeled(
-    variant.name,
-    FunctionSignature(pos_params, label_params, return_type),
-  )
+  FunctionSignature(variant.name, pos_params, label_params, return_type)
 }
 
 pub fn resolve_custom_type(
@@ -2014,20 +2015,20 @@ fn prototype_custom_type(
 }
 
 fn referenced_functions_clause(clause: Clause) -> List(FunctionId) {
-  let Clause(_, _, _, body) = clause
+  let Clause(_patterns, _variables, _guard, body) = clause
   referenced_functions_expr(body)
 }
 
 fn referenced_functions_expr(expr: Expression) -> List(FunctionId) {
   case expr {
     Call(fun, args) -> [fun, ..args] |> list.flat_map(referenced_functions_expr)
-    Case(_, subjects, clauses) ->
+    Case(_type, subjects, clauses) ->
       list.append(
         subjects |> list.flat_map(referenced_functions_expr),
         clauses |> list.flat_map(referenced_functions_clause),
       )
-    Fn(_, _, body) -> referenced_functions(body)
-    FunctionReference(_, id) -> [id]
+    Fn(_type, _arg_names, body) -> referenced_functions(body)
+    FunctionReference(_type, id) -> [id]
     Int(_) | Float(_) | String(_) | Trap(_, _, _) | Variable(_, _) -> []
   }
 }
@@ -2036,7 +2037,7 @@ fn referenced_functions(statement_list: List(Statement)) -> List(FunctionId) {
   statement_list
   |> list.flat_map(fn(stmt) {
     case stmt {
-      Assignment(_, _, expr) -> referenced_functions_expr(expr)
+      Assignment(_kind, _pattern, expr) -> referenced_functions_expr(expr)
       Expression(expr) -> referenced_functions_expr(expr)
     }
   })
@@ -2201,7 +2202,6 @@ fn analyze_high_level(
       let glance.Definition(
         definition: glance.Function(
           name:,
-          publicity:,
           parameters:,
           return:,
           ..,
@@ -2233,18 +2233,28 @@ fn analyze_high_level(
         context,
         return,
       ))
-      #(name, FunctionSignature(pos_args, lab_args, return))
+      #(name, FunctionSignature(name, pos_args, lab_args, return))
     })
     |> result.map(dict.from_list),
   )
-  // TODO: add prototypes for constructors
-  let internals = ModuleInternals(..internals, functions: function_prototypes)
+  let constructor_prototypes =
+    internals.custom_types
+    |> dict.values()
+    |> list.flat_map(fn(ct) { ct.variants })
+    |> list.map(fn(constructor) { #(constructor.name, constructor) })
+    |> dict.from_list
+
+  let internals =
+    ModuleInternals(
+      ..internals,
+      functions: dict.merge(function_prototypes, constructor_prototypes),
+    )
   // TODO: resolve constants
   // TODO: mostly works but is order-dependent - so functions calling other functions may not resolve fully
   use functions <- result.map(
     parsed.functions
     |> list.try_map(infer_function(internals, _))
-    |> result.map(list.map(_, fn(fun) { #(fun.name, fun) }))
+    |> result.map(list.map(_, fn(fun) { #(fun.signature.name, fun) }))
     |> result.map(dict.from_list),
   )
 
@@ -2266,7 +2276,10 @@ fn analyze_high_level(
     module_from_internals(
       ModuleInternals(
         ..internals,
-        functions: dict.map_values(functions, fn(_k, v) { v.signature }),
+        functions: dict.merge(
+          dict.map_values(functions, fn(_k, v) { v.signature }),
+          constructor_prototypes,
+        ),
         public_functions:,
       ),
     ),
