@@ -1221,6 +1221,7 @@ pub fn init_inference(
       })
     }
     glance.Call(function, args) -> {
+      // TODO: labeled arguments
       let args = list.map(args, fn(arg) { arg.item })
       let #(context, arg_types) =
         args

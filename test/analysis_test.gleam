@@ -1639,33 +1639,71 @@ pub fn fn_capture_test() {
 pub fn infer_function_test() {
   let tv_a = analysis.TypeVariable("a")
   let tv_b = analysis.TypeVariable("b")
+  let add =
+    analysis.FunctionSignature(
+      "add",
+      [analysis.int_type, analysis.int_type],
+      [],
+      analysis.int_type,
+    )
+  let fold =
+    analysis.FunctionSignature(
+      "fold",
+      [],
+      [
+        analysis.Labeled("over", analysis.list_type(tv_a)),
+        analysis.Labeled("from", tv_b),
+        analysis.Labeled("with", analysis.FunctionType([tv_b, tv_a], tv_b)),
+      ],
+      tv_b,
+    )
+
+  let funcref = fn(sig) {
+    analysis.FunctionReference(
+      analysis.signature_type(sig),
+      analysis.FunctionFromModule(
+        project.SourceLocation("foo", "bar"),
+        sig.name,
+      ),
+    )
+  }
+
+  let sum_expected =
+    Ok(
+      analysis.Function(
+        analysis.FunctionSignature(
+          "sum",
+          [analysis.list_type(analysis.int_type)],
+          [],
+          analysis.int_type,
+        ),
+        [glance.Named("lst")],
+        [
+          analysis.Expression(
+            analysis.Call(
+              funcref(analysis.substitute_signature(
+                fold,
+                dict.from_list([
+                  #("a", analysis.int_type),
+                  #("b", analysis.int_type),
+                ]),
+              )),
+              [
+                analysis.Variable(analysis.list_type(analysis.int_type), "lst"),
+                analysis.Int("0"),
+                funcref(add),
+              ],
+            ),
+          ),
+        ],
+      ),
+    )
+
+  // Positional arguments
   analysis.infer_function(
     analysis.ModuleInternals(
       ..empty_module_internals("foo", "bar"),
-      functions: dict.from_list([
-        #(
-          "add",
-          analysis.FunctionSignature(
-            "add",
-            [analysis.int_type, analysis.int_type],
-            [],
-            analysis.int_type,
-          ),
-        ),
-        #(
-          "fold",
-          analysis.FunctionSignature(
-            "fold",
-            [
-              analysis.list_type(tv_a),
-              tv_b,
-              analysis.FunctionType([tv_b, tv_a], tv_b),
-            ],
-            [],
-            tv_b,
-          ),
-        ),
-      ]),
+      functions: dict.from_list([#("add", add), #("fold", fold)]),
     ),
     glance.Definition(
       [],
@@ -1687,5 +1725,61 @@ pub fn infer_function_test() {
       ),
     ),
   )
-  |> pprint.debug()
+  |> should.equal(sum_expected)
+
+  // Labeled arguments, in order
+  analysis.infer_function(
+    analysis.ModuleInternals(
+      ..empty_module_internals("foo", "bar"),
+      functions: dict.from_list([#("add", add), #("fold", fold)]),
+    ),
+    glance.Definition(
+      [],
+      glance.Function(
+        "sum",
+        glance.Public,
+        [glance.FunctionParameter(None, glance.Named("lst"), None)],
+        None,
+        [
+          glance.Expression(
+            glance.Call(glance.Variable("fold"), [
+              glance.Field(Some("over"), glance.Variable("lst")),
+              glance.Field(Some("from"), glance.Int("0")),
+              glance.Field(Some("with"), glance.Variable("add")),
+            ]),
+          ),
+        ],
+        glance.Span(0, 1),
+      ),
+    ),
+  )
+  |> should.equal(sum_expected)
+
+  // Labeled arguments, out of order
+  analysis.infer_function(
+    analysis.ModuleInternals(
+      ..empty_module_internals("foo", "bar"),
+      functions: dict.from_list([#("add", add), #("fold", fold)]),
+    ),
+    glance.Definition(
+      [],
+      glance.Function(
+        "sum",
+        glance.Public,
+        [glance.FunctionParameter(None, glance.Named("lst"), None)],
+        None,
+        [
+          glance.Expression(
+            glance.Call(glance.Variable("fold"), [
+              glance.Field(Some("from"), glance.Int("0")),
+              glance.Field(Some("with"), glance.Variable("add")),
+              glance.Field(Some("over"), glance.Variable("lst")),
+            ]),
+          ),
+        ],
+        glance.Span(0, 1),
+      ),
+    ),
+  )
+  |> should.equal(sum_expected)
 }
