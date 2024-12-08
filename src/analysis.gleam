@@ -1222,7 +1222,6 @@ pub fn init_inference(
     }
     glance.Call(function, args) -> {
       // TODO: labeled arguments
-      let args = list.map(args, fn(arg) { arg.item })
       let #(context, arg_types) =
         args
         |> list.map_fold(from: context, with: fn(context, _) {
@@ -1235,6 +1234,38 @@ pub fn init_inference(
         environment,
         context,
       ))
+      use args <- result.try(case function {
+        FunctionReference(_, FunctionFromModule(module_id, function_name)) -> {
+          // TODO: any BuiltInFunction that needs to be supported?
+          //
+          // if we're calling a global function, look up the signature for labels
+          use signature <- result.try(
+            find_module_by_id(context.internals, module_id)
+            |> result.try(fn(module) { lookup(module.functions, function_name) }),
+          )
+          use paired <- result.try(pair_args(
+            signature,
+            args,
+            compiler.AtExpression(expr),
+          ))
+          list.try_map(paired, fn(p) {
+            case p {
+              #(_t, Some(a)) -> Ok(a)
+              _ -> Error(compiler.AnotherTypeError("Missing argument"))
+            }
+          })
+        }
+        _ -> {
+          // if we're not calling a global function, treat arguments as positional
+          list.try_map(args, fn(arg) {
+            case arg.label {
+              Some(_) ->
+                Error(compiler.AnotherTypeError("Labeled args not allowed here"))
+              None -> Ok(arg.item)
+            }
+          })
+        }
+      })
       init_inference_call(function, arg_types, args, environment, context)
     }
     glance.TupleIndex(tuple, index) -> {
