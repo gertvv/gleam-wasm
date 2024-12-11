@@ -11,11 +11,11 @@ import gleam/pair
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
+import graph
 import pprint
 import project.{type ModuleId, type Project}
 
 // TODO: next steps?
-// - functions with labeled args; use pair_args for function calls
 // - private types and functions
 // - constructors for results: Ok, Error
 // - qualified imports
@@ -94,6 +94,7 @@ pub type Labeled(a) {
   Labeled(label: String, item: a)
 }
 
+// TODO: should type parameters be part of the signature?
 pub type FunctionSignature {
   FunctionSignature(
     name: String,
@@ -963,6 +964,87 @@ pub fn init_inference_clause(
   )
 }
 
+pub fn init_inference_function(
+  def: glance.Definition(glance.Function),
+  expected_type: Type,
+  environment: Dict(String, Type),
+  context: Context,
+) -> Result(#(Context, Function), CompilerError) {
+  // TODO: turn into an init_inference_function that context can be passed into?
+  use #(pos_params, label_params) <- result.try(separate_positional_and_labeled(
+    def.definition.parameters
+    |> list.map(fn(param) { glance.Field(param.label, param.type_) }),
+  ))
+  use #(context, fun) <- result.map(init_inference(
+    glance.Fn(
+      def.definition.parameters
+        |> list.map(fn(p) { glance.FnParameter(p.name, p.type_) }),
+      def.definition.return,
+      def.definition.body,
+    ),
+    expected_type,
+    environment,
+    context,
+  ))
+  let assert Fn(FunctionType(param_types, return_type), _names, body) = fun
+
+  let #(pos_param_types, label_param_types) =
+    list.split(param_types, list.length(pos_params))
+  let fun =
+    Function(
+      FunctionSignature(
+        def.definition.name,
+        pos_param_types,
+        list.zip(label_params, label_param_types)
+          |> list.map(fn(p) { Labeled({ p.0 }.label, p.1) }),
+        return_type,
+      ),
+      def.definition.parameters |> list.map(fn(p) { p.name }),
+      body,
+    )
+  #(context, fun)
+}
+
+pub fn infer_functions(
+  internals: ModuleInternals,
+  defs: List(glance.Definition(glance.Function)),
+) -> Result(List(Function), CompilerError) {
+  let context = Context(internals, dict.new(), [], 1)
+  let #(context, func_types) =
+    list.map_fold(defs, context, fn(context, func) {
+      fresh_type_variable(context)
+      |> pair.map_second(fn(t) { #(func.definition.name, t) })
+    })
+  let environment = dict.from_list(func_types)
+  use #(context, functions) <- result.try(
+    list.map(func_types, pair.second)
+    |> list.zip(defs)
+    |> try_map_fold(from: context, with: fn(context, pair) {
+      let #(typ, def) = pair
+      init_inference_function(def, typ, environment, context)
+    }),
+  )
+  solve_constraints(context)
+  |> result.map(fn(subs) { list.map(functions, substitute_function(_, subs)) })
+}
+
+pub fn infer_function(
+  internals: ModuleInternals,
+  def: glance.Definition(glance.Function),
+) -> Result(Function, CompilerError) {
+  init_inference_function(
+    def,
+    TypeVariable("$1"),
+    dict.new(),
+    Context(internals, dict.from_list([#("$1", TypeVariable("$1"))]), [], 2),
+  )
+  |> result.try(fn(initd) {
+    let #(context, initd_fn) = initd
+    solve_constraints(context)
+    |> result.map(substitute_function(initd_fn, _))
+  })
+}
+
 pub fn init_inference(
   expr: glance.Expression,
   expected_type: Type,
@@ -1235,9 +1317,8 @@ pub fn init_inference(
         context,
       ))
       use args <- result.try(case function {
+        // TODO: any BuiltInFunction that needs to be supported?
         FunctionReference(_, FunctionFromModule(module_id, function_name)) -> {
-          // TODO: any BuiltInFunction that needs to be supported?
-          //
           // if we're calling a global function, look up the signature for labels
           use signature <- result.try(
             find_module_by_id(context.internals, module_id)
@@ -1649,6 +1730,14 @@ pub fn substitute(t: Type, subs: Dict(String, Type)) -> Type {
   }
 }
 
+pub fn substitute_function(f: Function, subs: Dict(String, Type)) -> Function {
+  Function(
+    substitute_signature(f.signature, subs),
+    f.argument_names,
+    substitute_statement_list(f.body, subs),
+  )
+}
+
 pub fn substitute_signature(
   s: FunctionSignature,
   subs: Dict(String, Type),
@@ -1748,41 +1837,6 @@ pub fn infer(
     solve_constraints(context)
     |> result.map(substitute_expression(initd_fn, _))
   })
-}
-
-pub fn infer_function(
-  data: ModuleInternals,
-  def: glance.Definition(glance.Function),
-) -> Result(Function, CompilerError) {
-  // TODO: turn into an init_inference_function that context can be passed into?
-  use #(pos_params, label_params) <- result.try(separate_positional_and_labeled(
-    def.definition.parameters
-    |> list.map(fn(param) { glance.Field(param.label, param.type_) }),
-  ))
-  use fun <- result.map(infer(
-    glance.Fn(
-      def.definition.parameters
-        |> list.map(fn(p) { glance.FnParameter(p.name, p.type_) }),
-      def.definition.return,
-      def.definition.body,
-    ),
-    data,
-  ))
-  let assert Fn(FunctionType(param_types, return_type), _names, body) = fun
-
-  let #(pos_param_types, label_param_types) =
-    list.split(param_types, list.length(pos_params))
-  Function(
-    FunctionSignature(
-      def.definition.name,
-      pos_param_types,
-      list.zip(label_params, label_param_types)
-        |> list.map(fn(p) { Labeled({ p.0 }.label, p.1) }),
-      return_type,
-    ),
-    def.definition.parameters |> list.map(fn(p) { p.name }),
-    body,
-  )
 }
 
 fn resolve_module(
@@ -2282,17 +2336,59 @@ fn analyze_high_level(
       functions: dict.merge(function_prototypes, constructor_prototypes),
     )
   // TODO: resolve constants
+
   // TODO: mostly works but is order-dependent - so functions calling other functions may not resolve fully
-  use functions <- result.map(
+  use functions <- result.try(
     parsed.functions
     |> list.try_map(infer_function(internals, _))
     |> result.map(list.map(_, fn(fun) { #(fun.signature.name, fun) }))
     |> result.map(dict.from_list),
   )
 
-  // TODO: call graph analysis
-  dict.map_values(functions, fn(k, v) { referenced_functions(v.body) })
-  |> pprint.debug
+  // call graph analysis
+  // TODO: probably ID referenced functions from the raw inputs and run inference only afterwards
+  let edges =
+    dict.to_list(functions)
+    |> list.flat_map(fn(fun) {
+      let #(from_name, Function(body:, ..)) = fun
+      referenced_functions(body)
+      |> list.filter_map(fn(ref_fn) {
+        case ref_fn {
+          FunctionFromModule(module_id, to_name)
+            if module_id == internals.location && to_name != from_name
+          -> Ok(#(from_name, to_name))
+          _ -> Error(Nil)
+        }
+      })
+    })
+  let nodes = dict.keys(functions)
+  let #(nodes, edges) = graph.squash_cycles(nodes, edges)
+  use internals <- result.map(
+    graph.topological_sort(nodes, edges)
+    |> result.replace_error(compiler.AnotherTypeError("Cycle appeared..."))
+    |> result.try(list.try_fold(
+      over: _,
+      from: internals,
+      with: fn(internals, fn_names) {
+        list.try_map(fn_names, fn(name) {
+          list.find(parsed.functions, fn(fun) { fun.definition.name == name })
+        })
+        |> result.replace_error(compiler.AnotherTypeError(
+          "Function disappeared...",
+        ))
+        |> result.try(infer_functions(internals, _))
+        |> result.map(fn(functions) {
+          // TODO: maybe not throw the function bodies away :'(
+          ModuleInternals(
+            ..internals,
+            functions: list.fold(functions, internals.functions, fn(d, fun) {
+              dict.insert(d, fun.signature.name, fun.signature)
+            }),
+          )
+        })
+      },
+    )),
+  )
 
   let public_functions =
     list.map(parsed.functions, fn(fun) {
@@ -2303,18 +2399,8 @@ fn analyze_high_level(
     |> list.map(pair.first)
     |> set.from_list
 
-  // TODO: maybe not throw the function bodies away :'(
   #(
-    module_from_internals(
-      ModuleInternals(
-        ..internals,
-        functions: dict.merge(
-          dict.map_values(functions, fn(_k, v) { v.signature }),
-          constructor_prototypes,
-        ),
-        public_functions:,
-      ),
-    ),
+    module_from_internals(ModuleInternals(..internals, public_functions:)),
     modules,
   )
 }

@@ -8,7 +8,6 @@ import gleam/pair
 import gleam/result
 import gleam/set
 import gleeunit/should
-import pprint
 import project
 
 fn empty_module_internals(package_name, module_path) {
