@@ -8,6 +8,7 @@ import gleam/pair
 import gleam/result
 import gleam/set
 import gleeunit/should
+import pprint
 import project
 
 fn empty_module_internals(package_name, module_path) {
@@ -1781,4 +1782,56 @@ pub fn infer_function_test() {
     ),
   )
   |> should.equal(sum_expected)
+}
+
+pub fn no_arg_constructor_test() {
+  let internals = empty_module_internals("foo", "bar")
+  let order_id = analysis.TypeFromModule(internals.location, "Order")
+  let order =
+    analysis.CustomType([], False, [
+      analysis.FunctionSignature(
+        "Lt",
+        [],
+        [],
+        analysis.TypeConstructor(order_id, []),
+      ),
+      analysis.FunctionSignature(
+        "Eq",
+        [],
+        [],
+        analysis.TypeConstructor(order_id, []),
+      ),
+      analysis.FunctionSignature(
+        "Gt",
+        [],
+        [],
+        analysis.TypeConstructor(order_id, []),
+      ),
+    ])
+  let internals =
+    analysis.ModuleInternals(
+      ..internals,
+      types: dict.from_list([
+        #(
+          "Order",
+          analysis.GenericType(analysis.TypeConstructor(order_id, []), []),
+        ),
+      ]),
+      functions: dict.from_list(
+        order.variants |> list.map(fn(variant) { #(variant.name, variant) }),
+      ),
+    )
+  "pub fn less_than() -> Order {
+    Lt
+  }"
+  |> glance.module
+  |> result.replace_error(Nil)
+  |> result.try(fn(module) {
+    list.find(module.functions, fn(fun) { fun.definition.name == "less_than" })
+  })
+  |> result.replace_error(compiler.AnotherTypeError("Sorry!"))
+  |> result.try(analysis.infer_function(internals, _))
+  |> result.is_ok
+  |> should.equal(True)
+  // TODO: same problem in patterns?
 }

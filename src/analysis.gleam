@@ -16,11 +16,10 @@ import pprint
 import project.{type ModuleId, type Project}
 
 // TODO: next steps?
-// - private types and functions
+// - constructors that have the same name as their type?
 // - constructors for results: Ok, Error
 // - qualified imports
 // - identify which variables a closure captures from its environment
-// - inference for mutually recursive functions? call graph analysis?
 // - constants
 // - complete inference for all expression types
 
@@ -970,7 +969,6 @@ pub fn init_inference_function(
   environment: Dict(String, Type),
   context: Context,
 ) -> Result(#(Context, Function), CompilerError) {
-  // TODO: turn into an init_inference_function that context can be passed into?
   use #(pos_params, label_params) <- result.try(separate_positional_and_labeled(
     def.definition.parameters
     |> list.map(fn(param) { glance.Field(param.label, param.type_) }),
@@ -1081,13 +1079,21 @@ pub fn init_inference(
       |> result.map(fn(signature) {
         let #(context, function_type) =
           replace_free_type_variables(signature_type(signature), context)
-        #(
-          add_constraint(context, Equal(expected_type, function_type)),
+        let func_ref =
           FunctionReference(
             function_type,
             FunctionFromModule(context.internals.location, name),
-          ),
-        )
+          )
+        case signature.name == string.capitalise(signature.name), signature {
+          True, FunctionSignature(_name, [], [], return_type) -> #(
+            add_constraint(context, Equal(expected_type, return_type)),
+            Call(func_ref, []),
+          )
+          _, _ -> #(
+            add_constraint(context, Equal(expected_type, function_type)),
+            func_ref,
+          )
+        }
       })
     }
     glance.NegateInt(expr) ->
@@ -1514,7 +1520,9 @@ fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
     }
     FunctionType(_, _), TypeConstructor(_, _)
     | TypeConstructor(_, _), FunctionType(_, _)
-    -> Error(compiler.AnotherTypeError("Unification not implemented"))
+    -> {
+      Error(compiler.AnotherTypeError("Unification not implemented"))
+    }
   }
 }
 
@@ -1822,6 +1830,7 @@ pub fn substitute_expression(
 }
 
 // TODO: also return a list of free type variables?
+// TODO: delete this function?
 pub fn infer(
   expr: glance.Expression,
   data: ModuleInternals,
@@ -2337,16 +2346,14 @@ fn analyze_high_level(
     )
   // TODO: resolve constants
 
-  // TODO: mostly works but is order-dependent - so functions calling other functions may not resolve fully
+  // call graph analysis
+  // TODO: probably ID referenced functions from the raw inputs and run inference only afterwards
   use functions <- result.try(
     parsed.functions
     |> list.try_map(infer_function(internals, _))
     |> result.map(list.map(_, fn(fun) { #(fun.signature.name, fun) }))
     |> result.map(dict.from_list),
   )
-
-  // call graph analysis
-  // TODO: probably ID referenced functions from the raw inputs and run inference only afterwards
   let edges =
     dict.to_list(functions)
     |> list.flat_map(fn(fun) {
