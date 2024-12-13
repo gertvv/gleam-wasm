@@ -1833,5 +1833,90 @@ pub fn no_arg_constructor_test() {
   |> result.try(analysis.infer_function(internals, _))
   |> result.is_ok
   |> should.equal(True)
-  // TODO: same problem in patterns?
+
+  "pub fn to_int(order: Order) {
+    case order {
+      Lt -> -1
+      Eq -> 0
+      Gt -> 1
+    }
+  }"
+  |> glance.module
+  |> result.replace_error(Nil)
+  |> result.try(fn(module) {
+    list.find(module.functions, fn(fun) { fun.definition.name == "to_int" })
+  })
+  |> result.replace_error(compiler.AnotherTypeError("Sorry!"))
+  |> result.try(analysis.infer_function(internals, _))
+  |> result.is_ok
+  |> should.equal(True)
+}
+
+pub fn result_test() {
+  let result_type =
+    analysis.TypeConstructor(
+      analysis.TypeFromModule(
+        project.SourceLocation("gleam", "gleam"),
+        "Result",
+      ),
+      [analysis.TypeVariable("a"), analysis.TypeVariable("b")],
+    )
+  let result_custom_type =
+    analysis.CustomType(parameters: ["a", "b"], opaque_: False, variants: [
+      analysis.FunctionSignature(
+        "Ok",
+        [analysis.TypeVariable("a")],
+        [],
+        result_type,
+      ),
+      analysis.FunctionSignature(
+        "Error",
+        [analysis.TypeVariable("b")],
+        [],
+        result_type,
+      ),
+    ])
+  let internals =
+    analysis.ModuleInternals(
+      ..empty_module_internals("foo", "bar"),
+      custom_types: dict.from_list([#("Result", result_custom_type)]),
+      types: dict.from_list([
+        #("Result", analysis.GenericType(result_type, ["a", "b"])),
+      ]),
+      functions: list.map(result_custom_type.variants, fn(variant) {
+          #(variant.name, variant)
+        })
+        |> dict.from_list,
+    )
+  let make_fn = fn(constructor_name, argument_expr) {
+    glance.Definition(
+      [],
+      glance.Function(
+        "func",
+        glance.Public,
+        [],
+        Some(
+          glance.NamedType("Result", None, [
+            compiler.float_type,
+            compiler.int_type,
+          ]),
+        ),
+        [
+          glance.Expression(
+            glance.Call(glance.Variable(constructor_name), [
+              glance.Field(None, argument_expr),
+            ]),
+          ),
+        ],
+        glance.Span(0, 1),
+      ),
+    )
+  }
+  analysis.infer_function(internals, make_fn("Ok", glance.Float("3.14")))
+  |> result.is_ok
+  |> should.equal(True)
+
+  analysis.infer_function(internals, make_fn("Error", glance.Int("42")))
+  |> result.is_ok
+  |> should.equal(True)
 }

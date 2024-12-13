@@ -16,9 +16,9 @@ import pprint
 import project.{type ModuleId, type Project}
 
 // TODO: next steps?
+// - don't try to parse function bodies of @external functions
 // - constructors that have the same name as their type?
-// - constructors for results: Ok, Error
-// - qualified imports
+// - unqualified imports
 // - identify which variables a closure captures from its environment
 // - constants
 // - complete inference for all expression types
@@ -141,6 +141,8 @@ pub const string_type = TypeConstructor(BuiltInType(StringType), [])
 pub fn list_type(item_type: Type) {
   TypeConstructor(BuiltInType(ListType), [item_type])
 }
+
+pub const gleam_module_id = project.SourceLocation("gleam", "gleam")
 
 pub type Field(t) {
   Field(label: Option(String), item: t)
@@ -1007,6 +1009,9 @@ pub fn infer_functions(
   internals: ModuleInternals,
   defs: List(glance.Definition(glance.Function)),
 ) -> Result(List(Function), CompilerError) {
+  pprint.debug(
+    defs |> list.map(fn(def) { #(def.definition.name, def.attributes) }),
+  )
   let context = Context(internals, dict.new(), [], 1)
   let #(context, func_types) =
     list.map_fold(defs, context, fn(context, func) {
@@ -1030,16 +1035,10 @@ pub fn infer_function(
   internals: ModuleInternals,
   def: glance.Definition(glance.Function),
 ) -> Result(Function, CompilerError) {
-  init_inference_function(
-    def,
-    TypeVariable("$1"),
-    dict.new(),
-    Context(internals, dict.from_list([#("$1", TypeVariable("$1"))]), [], 2),
-  )
-  |> result.try(fn(initd) {
-    let #(context, initd_fn) = initd
-    solve_constraints(context)
-    |> result.map(substitute_function(initd_fn, _))
+  infer_functions(internals, [def])
+  |> result.map(fn(res) {
+    let assert Ok(function) = list.first(res)
+    function
   })
 }
 
@@ -1954,6 +1953,8 @@ pub fn resolve_type(
             "Int", None, [] -> Ok(int_type)
             "Float", None, [] -> Ok(float_type)
             "String", None, [] -> Ok(string_type)
+            "Bool", None, [] -> Ok(bool_type)
+            "Nil", None, [] -> Ok(nil_type)
             "List", None, [item_type] ->
               resolve_type(data, item_type)
               |> result.map(list_type)
@@ -2172,6 +2173,31 @@ pub fn resolve_types(
       public_functions: set.new(),
     )
 
+  // TODO: hack or OK?
+  use unqualified_type_imports <- result.try(
+    list.flat_map(parsed.imports, fn(module) {
+      list.map(module.definition.unqualified_types, fn(unq) {
+        #(
+          module.definition.module,
+          unq.name,
+          unq.alias |> option.unwrap(unq.name),
+        )
+      })
+    })
+    |> list.try_map(fn(unq) {
+      let #(module_path, name, alias) = unq
+      // TODO: is resolve_module right here?
+      resolve_module(project, internals.location.package_name, module_path)
+      |> result.try(fn(module_id) {
+        dict.get(modules, module_id)
+        |> result.replace_error(compiler.ReferenceError(module_path))
+      })
+      |> result.try(fn(module) { lookup(module.types, name) })
+      |> result.map(fn(typ) { #(alias, typ) })
+    })
+    |> result.map(dict.from_list),
+  )
+
   // Resolve the type definitions
   use aliases <- result.try(
     result.all(list.map(parsed.type_aliases, resolve_type_alias(internals, _))),
@@ -2179,7 +2205,10 @@ pub fn resolve_types(
   let internals =
     ModuleInternals(
       ..internals,
-      types: dict.merge(prototypes, dict.from_list(aliases)),
+      types: dict.merge(
+        unqualified_type_imports,
+        dict.merge(prototypes, dict.from_list(aliases)),
+      ),
     )
   use custom_types <- result.map(
     result.all(list.map(parsed.custom_types, resolve_custom_type(internals, _))),
@@ -2233,10 +2262,9 @@ pub fn resolve_types(
 
   ModuleInternals(
     ..internals,
-    types: dict.merge(
-      dict.from_list(aliases),
-      dict.from_list(custom_types_generic),
-    ),
+    types: unqualified_type_imports
+      |> dict.merge(dict.from_list(aliases))
+      |> dict.merge(dict.from_list(custom_types_generic)),
     custom_types: dict.from_list(custom_types),
     public_types: set.from_list(public_types),
   )
@@ -2290,6 +2318,37 @@ fn analyze_high_level(
     modules,
     parsed,
   ))
+
+  // TODO: hack
+  let result_type =
+    TypeConstructor(TypeFromModule(gleam_module_id, "Result"), [
+      TypeVariable("a"),
+      TypeVariable("b"),
+    ])
+  let internals =
+    ModuleInternals(
+      ..internals,
+      custom_types: dict.insert(
+          internals.custom_types,
+          "Result",
+          CustomType(parameters: ["a", "b"], opaque_: False, variants: [
+            FunctionSignature("Ok", [TypeVariable("a")], [], result_type),
+            FunctionSignature("Error", [TypeVariable("b")], [], result_type),
+          ]),
+        )
+        |> dict.insert(
+          "Nil",
+          CustomType(parameters: [], opaque_: False, variants: [
+            FunctionSignature("Nil", [], [], nil_type),
+          ]),
+        ),
+      types: dict.insert(
+          internals.types,
+          "Result",
+          GenericType(result_type, ["a", "b"]),
+        )
+        |> dict.insert("Nil", GenericType(nil_type, [])),
+    )
 
   use function_prototypes <- result.try(
     list.try_map(parsed.functions, fn(def) {
