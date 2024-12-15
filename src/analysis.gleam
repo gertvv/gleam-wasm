@@ -16,7 +16,6 @@ import pprint
 import project.{type ModuleId, type Project}
 
 // TODO: next steps?
-// - don't try to parse function bodies of @external functions
 // - constructors that have the same name as their type?
 // - unqualified imports
 // - identify which variables a closure captures from its environment
@@ -103,11 +102,16 @@ pub type FunctionSignature {
   )
 }
 
+pub type FunctionBody {
+  GleamBody(List(Statement))
+  External(path: String, name: String)
+}
+
 pub type Function {
   Function(
     signature: FunctionSignature,
     argument_names: List(glance.AssignmentName),
-    body: List(Statement),
+    body: FunctionBody,
   )
 }
 
@@ -671,7 +675,7 @@ pub fn init_inference_pattern(
         maybe_module_name,
       ))
       // find the constructor & related types
-      use #(context, type_name, signature, constructed_type) <- result.try(case
+      use #(context, type_id, signature, constructed_type) <- result.try(case
         dict.get(module.functions, constructor_name)
       {
         Ok(signature) -> {
@@ -682,13 +686,10 @@ pub fn init_inference_pattern(
                 _name,
                 _pos_params,
                 _lab_params,
-                TypeConstructor(
-                  TypeFromModule(_module, custom_type_name),
-                  _type_params,
-                ) as constructed_type,
+                TypeConstructor(type_id, _type_params) as constructed_type,
               ) as signature,
             ) -> {
-              Ok(#(context, custom_type_name, signature, constructed_type))
+              Ok(#(context, type_id, signature, constructed_type))
             }
             _ -> Error(compiler.AnotherTypeError("Unexpected constructor type"))
           }
@@ -722,11 +723,7 @@ pub fn init_inference_pattern(
             |> fn(unzipped) {
               let #(patterns, variables) = unzipped
               PatternWithVariables(
-                PatternConstructor(
-                  TypeFromModule(module.location, type_name),
-                  signature,
-                  patterns,
-                ),
+                PatternConstructor(type_id, signature, patterns),
                 variables,
               )
             },
@@ -971,16 +968,104 @@ pub fn init_inference_function(
   environment: Dict(String, Type),
   context: Context,
 ) -> Result(#(Context, Function), CompilerError) {
+  let exp_target = context.internals.project.target
+  let maybe_external =
+    list.find_map(def.attributes, fn(attr) {
+      case attr {
+        glance.Attribute(
+          name: "external",
+          arguments: [
+            glance.Variable(target),
+            glance.String(path),
+            glance.String(name),
+          ],
+        )
+          if target == exp_target
+        -> Ok(External(path, name))
+        _ -> Error(Nil)
+      }
+    })
+  case maybe_external {
+    Ok(external) ->
+      init_inference_external_function(
+        def.definition,
+        external,
+        expected_type,
+        context,
+      )
+    Error(Nil) ->
+      init_inference_gleam_function(
+        def.definition,
+        expected_type,
+        environment,
+        context,
+      )
+  }
+}
+
+fn init_inference_external_function(
+  def: glance.Function,
+  external: FunctionBody,
+  expected_type: Type,
+  context: Context,
+) -> Result(#(Context, Function), CompilerError) {
+  let types_required =
+    compiler.AnotherTypeError("External functions must have type declarations")
   use #(pos_params, label_params) <- result.try(separate_positional_and_labeled(
-    def.definition.parameters
+    def.parameters
     |> list.map(fn(param) { glance.Field(param.label, param.type_) }),
   ))
+  use pos_param_types <- result.try(
+    pos_params
+    |> option.all
+    |> option.to_result(types_required)
+    |> result.try(fn(l) { list.try_map(l, resolve_type(context.internals, _)) }),
+  )
+  use label_param_types <- result.try(
+    label_params
+    |> list.map(fn(field) { field.item })
+    |> option.all
+    |> option.to_result(types_required)
+    |> result.try(fn(l) { list.try_map(l, resolve_type(context.internals, _)) }),
+  )
+  use return_type <- result.map(
+    def.return
+    |> option.to_result(types_required)
+    |> result.try(resolve_type(context.internals, _)),
+  )
+
+  let signature =
+    FunctionSignature(
+      def.name,
+      pos_param_types,
+      list.zip(label_params, label_param_types)
+        |> list.map(fn(p) { Labeled({ p.0 }.label, p.1) }),
+      return_type,
+    )
+
+  #(
+    add_constraint(context, Equal(expected_type, signature_type(signature))),
+    Function(signature, def.parameters |> list.map(fn(p) { p.name }), external),
+  )
+}
+
+fn init_inference_gleam_function(
+  def: glance.Function,
+  expected_type: Type,
+  environment: Dict(String, Type),
+  context: Context,
+) -> Result(#(Context, Function), CompilerError) {
+  use #(pos_params, label_params) <- result.try(separate_positional_and_labeled(
+    def.parameters
+    |> list.map(fn(param) { glance.Field(param.label, param.type_) }),
+  ))
+
   use #(context, fun) <- result.map(init_inference(
     glance.Fn(
-      def.definition.parameters
+      def.parameters
         |> list.map(fn(p) { glance.FnParameter(p.name, p.type_) }),
-      def.definition.return,
-      def.definition.body,
+      def.return,
+      def.body,
     ),
     expected_type,
     environment,
@@ -993,14 +1078,14 @@ pub fn init_inference_function(
   let fun =
     Function(
       FunctionSignature(
-        def.definition.name,
+        def.name,
         pos_param_types,
         list.zip(label_params, label_param_types)
           |> list.map(fn(p) { Labeled({ p.0 }.label, p.1) }),
         return_type,
       ),
-      def.definition.parameters |> list.map(fn(p) { p.name }),
-      body,
+      def.parameters |> list.map(fn(p) { p.name }),
+      GleamBody(body),
     )
   #(context, fun)
 }
@@ -1009,9 +1094,6 @@ pub fn infer_functions(
   internals: ModuleInternals,
   defs: List(glance.Definition(glance.Function)),
 ) -> Result(List(Function), CompilerError) {
-  pprint.debug(
-    defs |> list.map(fn(def) { #(def.definition.name, def.attributes) }),
-  )
   let context = Context(internals, dict.new(), [], 1)
   let #(context, func_types) =
     list.map_fold(defs, context, fn(context, func) {
@@ -1040,6 +1122,31 @@ pub fn infer_function(
     let assert Ok(function) = list.first(res)
     function
   })
+}
+
+fn maybe_call_no_arg_constructor(
+  module_id: ModuleId,
+  signature: FunctionSignature,
+  expected_type: Type,
+  context: Context,
+) -> #(Context, Expression) {
+  let #(context, function_type) =
+    replace_free_type_variables(signature_type(signature), context)
+  let func_ref =
+    FunctionReference(
+      function_type,
+      FunctionFromModule(module_id, signature.name),
+    )
+  case signature.name == string.capitalise(signature.name), signature {
+    True, FunctionSignature(_name, [], [], return_type) -> #(
+      add_constraint(context, Equal(expected_type, return_type)),
+      Call(func_ref, []),
+    )
+    _, _ -> #(
+      add_constraint(context, Equal(expected_type, function_type)),
+      func_ref,
+    )
+  }
 }
 
 pub fn init_inference(
@@ -1075,25 +1182,12 @@ pub fn init_inference(
         }),
       )
       lookup(context.internals.functions, name)
-      |> result.map(fn(signature) {
-        let #(context, function_type) =
-          replace_free_type_variables(signature_type(signature), context)
-        let func_ref =
-          FunctionReference(
-            function_type,
-            FunctionFromModule(context.internals.location, name),
-          )
-        case signature.name == string.capitalise(signature.name), signature {
-          True, FunctionSignature(_name, [], [], return_type) -> #(
-            add_constraint(context, Equal(expected_type, return_type)),
-            Call(func_ref, []),
-          )
-          _, _ -> #(
-            add_constraint(context, Equal(expected_type, function_type)),
-            func_ref,
-          )
-        }
-      })
+      |> result.map(maybe_call_no_arg_constructor(
+        context.internals.location,
+        _,
+        expected_type,
+        context,
+      ))
     }
     glance.NegateInt(expr) ->
       init_inference_call_builtin(
@@ -1284,17 +1378,12 @@ pub fn init_inference(
       |> result.try(dict.get(context.internals.imports, _))
       |> result.try(fn(module) {
         dict.get(module.functions, label)
-        |> result.map(fn(signature) {
-          let #(context, function_type) =
-            replace_free_type_variables(signature_type(signature), context)
-          #(
-            add_constraint(context, Equal(expected_type, function_type)),
-            FunctionReference(
-              function_type,
-              FunctionFromModule(module.location, label),
-            ),
-          )
-        })
+        |> result.map(maybe_call_no_arg_constructor(
+          module.location,
+          _,
+          expected_type,
+          context,
+        ))
       })
       |> result.replace_error(compiler.AnotherTypeError("Field access error"))
       |> result.lazy_or(fn() {
@@ -1507,6 +1596,7 @@ fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
     TypeConstructor(id_i, args_i), TypeConstructor(id_j, args_j) -> {
       case id_i == id_j && list.length(args_i) == list.length(args_j) {
         False -> {
+          pprint.debug(#(a, b))
           Error(compiler.AnotherTypeError("Mismatching TypeConstructors"))
         }
         True -> {
@@ -1520,6 +1610,7 @@ fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
     FunctionType(_, _), TypeConstructor(_, _)
     | TypeConstructor(_, _), FunctionType(_, _)
     -> {
+      pprint.debug(#(a, b))
       Error(compiler.AnotherTypeError("Unification not implemented"))
     }
   }
@@ -1739,9 +1830,12 @@ pub fn substitute(t: Type, subs: Dict(String, Type)) -> Type {
 
 pub fn substitute_function(f: Function, subs: Dict(String, Type)) -> Function {
   Function(
-    substitute_signature(f.signature, subs),
-    f.argument_names,
-    substitute_statement_list(f.body, subs),
+    signature: substitute_signature(f.signature, subs),
+    argument_names: f.argument_names,
+    body: case f.body {
+      GleamBody(body) -> GleamBody(substitute_statement_list(body, subs))
+      _ as extern -> extern
+    },
   )
 }
 
@@ -2341,13 +2435,21 @@ fn analyze_high_level(
           CustomType(parameters: [], opaque_: False, variants: [
             FunctionSignature("Nil", [], [], nil_type),
           ]),
+        )
+        |> dict.insert(
+          "Bool",
+          CustomType(parameters: [], opaque_: False, variants: [
+            FunctionSignature("True", [], [], bool_type),
+            FunctionSignature("False", [], [], bool_type),
+          ]),
         ),
       types: dict.insert(
           internals.types,
           "Result",
           GenericType(result_type, ["a", "b"]),
         )
-        |> dict.insert("Nil", GenericType(nil_type, [])),
+        |> dict.insert("Nil", GenericType(nil_type, []))
+        |> dict.insert("Bool", GenericType(bool_type, [])),
     )
 
   use function_prototypes <- result.try(
@@ -2417,7 +2519,10 @@ fn analyze_high_level(
     dict.to_list(functions)
     |> list.flat_map(fn(fun) {
       let #(from_name, Function(body:, ..)) = fun
-      referenced_functions(body)
+      case body {
+        GleamBody(body) -> referenced_functions(body)
+        _ -> []
+      }
       |> list.filter_map(fn(ref_fn) {
         case ref_fn {
           FunctionFromModule(module_id, to_name)
@@ -2456,6 +2561,17 @@ fn analyze_high_level(
     )),
   )
 
+  let public_constructors =
+    list.filter_map(parsed.custom_types, fn(ct) {
+      let glance.Definition(_attr, glance.CustomType(publicity:, variants:, ..)) =
+        ct
+      case publicity {
+        glance.Public -> Ok(list.map(variants, fn(variant) { variant.name }))
+        glance.Private -> Error(Nil)
+      }
+    })
+    |> list.flatten
+
   let public_functions =
     list.map(parsed.functions, fn(fun) {
       let glance.Definition(_attr, glance.Function(name:, publicity:, ..)) = fun
@@ -2463,6 +2579,7 @@ fn analyze_high_level(
     })
     |> list.filter(fn(pair) { pair.second(pair) == glance.Public })
     |> list.map(pair.first)
+    |> list.append(public_constructors)
     |> set.from_list
 
   #(
@@ -2516,7 +2633,7 @@ fn print_dep_tree(tree: ModDeps, indent: String) -> String {
 }
 
 pub fn main() {
-  project.scan_project(".")
+  project.scan_project(".", "javascript")
   |> result.try(fn(project) {
     analyze_module(
       project,

@@ -15,6 +15,7 @@ import simplifile
 pub type Project {
   Project(
     name: String,
+    target: String,
     packages: Dict(String, Package),
     parse_module: fn(Project, ModuleId) -> Result(glance.Module, CompilerError),
   )
@@ -94,6 +95,7 @@ fn scan_package(source_path: String) {
 
 fn scan_packages(
   source_path: String,
+  target: String,
   packages: Dict(String, Package),
   chain: Set(String),
 ) -> Result(Project, CompilerError) {
@@ -103,7 +105,7 @@ fn scan_packages(
     GleamPackage(dependencies: dependencies, ..) -> {
       list.try_fold(
         dependencies,
-        Project(package.name, packages, parse_module),
+        Project(package.name, target, packages, parse_module),
         fn(project, dependency) {
           case
             set.contains(chain, dependency),
@@ -115,11 +117,12 @@ fn scan_packages(
               result.map(
                 scan_packages(
                   filepath.join("./build/packages", dependency),
+                  target,
                   project.packages,
                   set.insert(chain, package.name),
                 ),
                 fn(nested) {
-                  Project(project.name, nested.packages, parse_module)
+                  Project(project.name, target, nested.packages, parse_module)
                 },
               )
             }
@@ -127,16 +130,16 @@ fn scan_packages(
         },
       )
     }
-    OtherPackage(name, _) -> Ok(Project(name, packages, parse_module))
+    OtherPackage(name, _) -> Ok(Project(name, target, packages, parse_module))
   }
 }
 
-pub fn scan_project(source_path: String) {
-  scan_packages(source_path, dict.new(), set.new())
+pub fn scan_project(source_path: String, target: String) {
+  scan_packages(source_path, target, dict.new(), set.new())
 }
 
 pub fn main() {
-  scan_project(".")
+  scan_project(".", "javascript")
   |> io.debug
 }
 

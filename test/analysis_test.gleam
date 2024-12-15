@@ -13,7 +13,7 @@ import project
 
 fn empty_module_internals(package_name, module_path) {
   let project =
-    project.Project(package_name, dict.new(), fn(_a, _b) {
+    project.Project(package_name, "javascript", dict.new(), fn(_a, _b) {
       Error(compiler.ReferenceError("test"))
     })
   let location = project.SourceLocation(package_name, module_path)
@@ -186,7 +186,7 @@ pub fn resolve_basic_types_test() {
 
 pub fn resolve_dependent_custom_types_test() {
   let project =
-    project.Project("test", dict.new(), fn(_a, _b) {
+    project.Project("test", "javascript", dict.new(), fn(_a, _b) {
       Error(compiler.ReferenceError("foo"))
     })
   let location = project.SourceLocation("test", "bar")
@@ -352,7 +352,7 @@ pub fn resolve_dependent_custom_types_test() {
 
 pub fn resolve_type_aliases_test() {
   let project =
-    project.Project("test", dict.new(), fn(_a, _b) {
+    project.Project("test", "javascript", dict.new(), fn(_a, _b) {
       Error(compiler.ReferenceError("foo"))
     })
   let location = project.SourceLocation("test", "bar")
@@ -1156,7 +1156,9 @@ pub fn type_infer_constructor_pattern_test() {
     analysis.CustomType([], False, [variant_a, variant_b])
   let internals =
     analysis.ModuleInternals(
-      project: project.Project("name", dict.new(), fn(_, _) { panic }),
+      project: project.Project("name", "javascript", dict.new(), fn(_, _) {
+        panic
+      }),
       location: module_id,
       imports: dict.new(),
       types: dict.from_list([#("MyType", analysis.GenericType(my_type, []))]),
@@ -1274,7 +1276,9 @@ pub fn type_infer_field_access_test() {
     )
   let internals =
     analysis.ModuleInternals(
-      project: project.Project("name", dict.new(), fn(_, _) { panic }),
+      project: project.Project("name", "javascript", dict.new(), fn(_, _) {
+        panic
+      }),
       location: module_id,
       imports: dict.new(),
       types: dict.from_list([#("MyType", analysis.GenericType(my_type, []))]),
@@ -1669,35 +1673,33 @@ pub fn infer_function_test() {
   }
 
   let sum_expected =
-    Ok(
-      analysis.Function(
-        analysis.FunctionSignature(
-          "sum",
-          [analysis.list_type(analysis.int_type)],
-          [],
-          analysis.int_type,
-        ),
-        [glance.Named("lst")],
-        [
-          analysis.Expression(
-            analysis.Call(
-              funcref(analysis.substitute_signature(
-                fold,
-                dict.from_list([
-                  #("a", analysis.int_type),
-                  #("b", analysis.int_type),
-                ]),
-              )),
-              [
-                analysis.Variable(analysis.list_type(analysis.int_type), "lst"),
-                analysis.Int("0"),
-                funcref(add),
-              ],
-            ),
-          ),
-        ],
+    Ok(analysis.Function(
+      analysis.FunctionSignature(
+        "sum",
+        [analysis.list_type(analysis.int_type)],
+        [],
+        analysis.int_type,
       ),
-    )
+      [glance.Named("lst")],
+      analysis.GleamBody([
+        analysis.Expression(
+          analysis.Call(
+            funcref(analysis.substitute_signature(
+              fold,
+              dict.from_list([
+                #("a", analysis.int_type),
+                #("b", analysis.int_type),
+              ]),
+            )),
+            [
+              analysis.Variable(analysis.list_type(analysis.int_type), "lst"),
+              analysis.Int("0"),
+              funcref(add),
+            ],
+          ),
+        ),
+      ]),
+    ))
 
   // Positional arguments
   analysis.infer_function(
@@ -1919,4 +1921,34 @@ pub fn result_test() {
   analysis.infer_function(internals, make_fn("Error", glance.Int("42")))
   |> result.is_ok
   |> should.equal(True)
+}
+
+fn infer_single_function(code: String) {
+  let internals = empty_module_internals("foo", "bar")
+  glance.module(code)
+  |> result.replace_error(Nil)
+  |> result.try(fn(module) { list.first(module.functions) })
+  |> result.try(fn(def) {
+    analysis.infer_function(internals, def)
+    |> result.replace_error(Nil)
+  })
+}
+
+pub fn external_test() {
+  infer_single_function(
+    "@external(javascript, \"../gleam_stdlib.mjs\", \"ceiling\")
+  fn do_ceiling(a: Float) -> Float",
+  )
+  |> should.equal(
+    Ok(analysis.Function(
+      analysis.FunctionSignature(
+        "do_ceiling",
+        [analysis.TypeConstructor(analysis.BuiltInType(analysis.FloatType), [])],
+        [],
+        analysis.TypeConstructor(analysis.BuiltInType(analysis.FloatType), []),
+      ),
+      [glance.Named("a")],
+      analysis.External("../gleam_stdlib.mjs", "ceiling"),
+    )),
+  )
 }
