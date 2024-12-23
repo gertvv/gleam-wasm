@@ -803,14 +803,19 @@ fn init_inference_call_builtin(
 ) {
   let #(context, arg_types, return_type) = case built_in_function {
     BinaryOperator(operator) -> {
-      let #(operand_type, result_type) = case operator {
-        glance.And | glance.Or -> #(bool_type, bool_type)
-        glance.Eq | glance.NotEq -> #(TypeVariable("a"), bool_type)
+      let #(context, operand_type, result_type) = case operator {
+        glance.And | glance.Or -> #(context, bool_type, bool_type)
+        glance.Eq | glance.NotEq -> {
+          let #(context, var) = fresh_type_variable(context)
+          #(context, var, bool_type)
+        }
         glance.LtInt | glance.LtEqInt | glance.GtEqInt | glance.GtInt -> #(
+          context,
           int_type,
           bool_type,
         )
         glance.LtFloat | glance.LtEqFloat | glance.GtEqFloat | glance.GtFloat -> #(
+          context,
           float_type,
           bool_type,
         )
@@ -818,12 +823,13 @@ fn init_inference_call_builtin(
         | glance.SubInt
         | glance.MultInt
         | glance.DivInt
-        | glance.RemainderInt -> #(int_type, int_type)
+        | glance.RemainderInt -> #(context, int_type, int_type)
         glance.AddFloat | glance.SubFloat | glance.MultFloat | glance.DivFloat -> #(
+          context,
           float_type,
           float_type,
         )
-        glance.Concatenate -> #(string_type, string_type)
+        glance.Concatenate -> #(context, string_type, string_type)
         glance.Pipe -> panic
       }
       #(context, [operand_type, operand_type], result_type)
@@ -1137,8 +1143,8 @@ fn maybe_call_no_arg_constructor(
       function_type,
       FunctionFromModule(module_id, signature.name),
     )
-  case signature.name == string.capitalise(signature.name), signature {
-    True, FunctionSignature(_name, [], [], return_type) -> #(
+  case signature.name == string.capitalise(signature.name), function_type {
+    True, FunctionType([], return_type) -> #(
       add_constraint(context, Equal(expected_type, return_type)),
       Call(func_ref, []),
     )
@@ -2014,7 +2020,17 @@ pub fn resolve_type(
         Ok(#(location, candidate_type)) -> {
           case candidate_type, params {
             GenericType(typ: nested_type, parameters: exp_params), act_params -> {
-              list.strict_zip(exp_params, act_params)
+              // replace type variables to prevent clashes
+              let rep_params =
+                list.index_map(exp_params, fn(_, i) { "$" <> int.to_string(i) })
+              let nested_type =
+                list.map2(exp_params, rep_params, fn(a, b) {
+                  #(a, TypeVariable(b))
+                })
+                |> dict.from_list
+                |> substitute(nested_type, _)
+              // now match and replace type parameters
+              list.strict_zip(rep_params, act_params)
               |> result.replace_error(compiler.TypeArityError(
                 declared_type,
                 list.length(exp_params),
@@ -2373,6 +2389,12 @@ fn analyze_high_level(
     dict.get(modules, location)
     |> result.map(fn(module) { #(module, modules) }),
   )
+  pprint.debug(
+    ">>> analyze_high_level "
+    <> location.module_path
+    <> " "
+    <> location.package_name,
+  )
   use parsed <- result.try(project.parse_module(project, location))
   use #(modules, imports) <- result.try(
     try_map_fold(parsed.imports, modules, fn(modules, import_) {
@@ -2405,6 +2427,12 @@ fn analyze_high_level(
     }),
   )
   let imports = dict.from_list(imports)
+  pprint.debug(
+    ">>> analyze_high_level -- resolve types "
+    <> location.module_path
+    <> " "
+    <> location.package_name,
+  )
   use internals <- result.try(resolve_types(
     project,
     location,
@@ -2452,6 +2480,13 @@ fn analyze_high_level(
         |> dict.insert("Bool", GenericType(bool_type, [])),
     )
 
+  pprint.debug(
+    ">>> analyze_high_level -- make function prototypes "
+    <> location.module_path
+    <> " "
+    <> location.package_name,
+  )
+
   use function_prototypes <- result.try(
     list.try_map(parsed.functions, fn(def) {
       let context = Context(internals, dict.new(), [], 1)
@@ -2493,6 +2528,7 @@ fn analyze_high_level(
     })
     |> result.map(dict.from_list),
   )
+
   let constructor_prototypes =
     internals.custom_types
     |> dict.values()
@@ -2507,6 +2543,12 @@ fn analyze_high_level(
     )
   // TODO: resolve constants
 
+  pprint.debug(
+    ">>> analyze_high_level -- call graph "
+    <> location.module_path
+    <> " "
+    <> location.package_name,
+  )
   // call graph analysis
   // TODO: probably ID referenced functions from the raw inputs and run inference only afterwards
   use functions <- result.try(

@@ -1923,19 +1923,19 @@ pub fn result_test() {
   |> should.equal(True)
 }
 
-fn infer_single_function(code: String) {
-  let internals = empty_module_internals("foo", "bar")
+fn infer_single_function(internals: analysis.ModuleInternals, code: String) {
   glance.module(code)
-  |> result.replace_error(Nil)
-  |> result.try(fn(module) { list.first(module.functions) })
-  |> result.try(fn(def) {
-    analysis.infer_function(internals, def)
-    |> result.replace_error(Nil)
+  |> result.map_error(compiler.ParseError)
+  |> result.try(fn(module) {
+    list.first(module.functions)
+    |> result.replace_error(compiler.AnotherTypeError("No function found"))
   })
+  |> result.try(fn(def) { analysis.infer_function(internals, def) })
 }
 
 pub fn external_test() {
   infer_single_function(
+    empty_module_internals("foo", "bar"),
     "@external(javascript, \"../gleam_stdlib.mjs\", \"ceiling\")
   fn do_ceiling(a: Float) -> Float",
   )
@@ -1951,4 +1951,87 @@ pub fn external_test() {
       analysis.External("../gleam_stdlib.mjs", "ceiling"),
     )),
   )
+}
+
+pub fn nested_option_test() {
+  let internals = empty_module_internals("foo", "bar")
+  analysis.resolve_type(
+    analysis.ModuleInternals(
+      ..internals,
+      types: dict.from_list([
+        #(
+          "Option",
+          analysis.GenericType(
+            analysis.TypeConstructor(
+              analysis.TypeFromModule(internals.location, "Option"),
+              [analysis.TypeVariable("a")],
+            ),
+            ["a"],
+          ),
+        ),
+      ]),
+    ),
+    glance.NamedType("Option", None, [
+      glance.NamedType("Option", None, [glance.VariableType("a")]),
+    ]),
+  )
+  |> should.equal(
+    Ok(
+      analysis.TypeConstructor(
+        analysis.TypeFromModule(project.SourceLocation("foo", "bar"), "Option"),
+        [
+          analysis.TypeConstructor(
+            analysis.TypeFromModule(
+              project.SourceLocation("foo", "bar"),
+              "Option",
+            ),
+            [analysis.TypeVariable("a")],
+          ),
+        ],
+      ),
+    ),
+  )
+}
+
+pub fn fun_with_options_test() {
+  let internals = empty_module_internals("gleam_stdlib", "gleam/option")
+  let option_type =
+    analysis.TypeConstructor(
+      analysis.TypeFromModule(internals.location, "Option"),
+      [analysis.TypeVariable("a")],
+    )
+  let internals =
+    analysis.ModuleInternals(
+      ..internals,
+      types: dict.from_list([
+        #("Option", analysis.GenericType(option_type, ["a"])),
+      ]),
+      functions: dict.from_list([
+        #("None", analysis.FunctionSignature("None", [], [], option_type)),
+      ]),
+    )
+
+  // TODO: add a proper test for this scenario:
+  // Equality was improperly using a local TypeVariable that clashed with that in
+  // option_type
+  infer_single_function(
+    internals,
+    "pub fn is_none(option: Option(a)) -> Bool {
+      option == None
+    }",
+  )
+  |> result.is_ok
+  |> should.equal(True)
+
+  // TODO: add a proper test for this scenario:
+  // The type variable in the None signature wasn't being substituted in the
+  // constraints
+  infer_single_function(
+    internals,
+    "pub fn none() -> Option(List(a)) {
+      None
+    }",
+  )
+  |> result.is_ok
+  |> should.equal(True)
 }
