@@ -189,6 +189,7 @@ pub type Clause {
 
 // Expression with types
 pub type Expression {
+  // TODO: merge literals into one?
   Int(val: String)
   Float(val: String)
   String(val: String)
@@ -261,10 +262,21 @@ pub type Context {
     substitution: Dict(String, Type),
     constraints: List(Constraint),
     next_variable: Int,
+    next_generated_name: Int,
   )
 }
 
-fn fresh_type_variable(context: Context) -> #(Context, Type) {
+pub fn new_context(internals: ModuleInternals) -> Context {
+  Context(
+    internals:,
+    substitution: dict.new(),
+    constraints: [],
+    next_variable: 1,
+    next_generated_name: 1,
+  )
+}
+
+pub fn fresh_type_variable(context: Context) -> #(Context, Type) {
   let name = "$" <> int.to_string(context.next_variable)
   let type_variable = TypeVariable(name)
   #(
@@ -274,6 +286,13 @@ fn fresh_type_variable(context: Context) -> #(Context, Type) {
       next_variable: context.next_variable + 1,
     ),
     type_variable,
+  )
+}
+
+fn fresh_generated_name(context: Context) -> #(Context, glance.AssignmentName) {
+  #(
+    Context(..context, next_generated_name: context.next_generated_name + 1),
+    glance.Named("$" <> int.to_string(context.next_generated_name)),
   )
 }
 
@@ -311,27 +330,22 @@ fn init_inference_block_internal(
   context: Context,
   acc: List(Statement),
 ) -> Result(#(Context, List(Statement)), CompilerError) {
-  case list {
-    [] -> {
+  case list, acc {
+    [], [] -> {
       // empty blocks have nil type
       Ok(#(add_constraint(context, Equal(expected_type, nil_type)), []))
     }
-    [stmt] -> {
-      // last statement in the block must produce the block's expected_type
-      init_inference_statement(stmt, expected_type, environment, context)
-      |> result.map(fn(res) {
-        let #(context, _, stmt) = res
-        #(context, [stmt, ..acc])
-      })
+    [], _ -> {
+      Ok(#(context, acc))
     }
-    [stmt, ..tail] -> {
-      // other statements in the block expand the environment
-      let #(context, variable_type) = fresh_type_variable(context)
-      init_inference_statement(stmt, variable_type, environment, context)
+    [stmt, ..rest], _ -> {
+      // each statement expands the environment, and use statements can eat the
+      // rest of the block
+      init_inference_statement(stmt, rest, expected_type, environment, context)
       |> result.try(fn(res) {
-        let #(context, environment, stmt) = res
+        let #(rest, context, environment, stmt) = res
         init_inference_block_internal(
-          tail,
+          rest,
           expected_type,
           environment,
           context,
@@ -735,10 +749,14 @@ pub fn init_inference_pattern(
 
 pub fn init_inference_statement(
   stmt: glance.Statement,
+  rest: List(glance.Statement),
   expected_type: Type,
   environment: Dict(String, Type),
   context: Context,
-) -> Result(#(Context, Dict(String, Type), Statement), CompilerError) {
+) -> Result(
+  #(List(glance.Statement), Context, Dict(String, Type), Statement),
+  CompilerError,
+) {
   case stmt {
     glance.Assignment(
       kind: glance.Let,
@@ -762,30 +780,176 @@ pub fn init_inference_statement(
         environment,
         context,
       ))
+      // in tail position, must generate the expected type
+      let context = case rest {
+        [] -> add_constraint(context, Equal(expected_type, assignment_type))
+        _ -> context
+      }
       #(
+        rest,
         context,
         dict.merge(environment, pattern.variables),
         Assignment(glance.Let, pattern, expr),
       )
     }
     glance.Assignment(_, _, _, _) -> todo
-    glance.Expression(expr) ->
+    glance.Expression(expr) -> {
+      let #(context, expected_type) = case rest {
+        [] -> #(context, expected_type)
+        _ -> fresh_type_variable(context)
+      }
       init_inference(expr, expected_type, environment, context)
       |> result.map(fn(res) {
         let #(context, expr) = res
-        #(context, environment, Expression(expr))
+        #(rest, context, environment, Expression(expr))
       })
-    glance.Use(_, _) -> todo
+    }
+    glance.Use(patterns, function) -> {
+      let #(context, args) =
+        list.map_fold(patterns, context, fn(context, pattern) {
+          case pattern {
+            glance.PatternVariable(name) -> #(context, glance.Named(name))
+            glance.PatternDiscard(name) -> #(context, glance.Discarded(name))
+            _ -> fresh_generated_name(context)
+          }
+        })
+      use #(context, let_statements) <- result.try(
+        list.zip(args, patterns)
+        |> try_map_fold(from: context, with: fn(context, p) {
+          case p {
+            #(_, glance.PatternVariable(_)) | #(_, glance.PatternDiscard(_)) ->
+              Ok(#(context, None))
+            #(glance.Named(assignment_name), pattern) ->
+              Ok(#(
+                context,
+                Some(glance.Assignment(
+                  glance.Let,
+                  pattern,
+                  None,
+                  glance.Variable(assignment_name),
+                )),
+              ))
+            _ ->
+              Error(compiler.AnotherTypeError(
+                "This should not have happened...",
+              ))
+          }
+        })
+        |> result.map(pair.map_second(_, option.values)),
+      )
+
+      let callback_fn =
+        glance.Fn(
+          list.map(args, fn(arg) { glance.FnParameter(arg, None) }),
+          None,
+          list.append(let_statements, rest),
+        )
+
+      let #(outer_fn, outer_args) = case function {
+        glance.Call(outer_fn, outer_args) -> #(outer_fn, outer_args)
+        glance.Variable(_) -> #(function, [])
+        _ -> todo
+      }
+
+      use #(context, expr) <- result.map(init_inference_call(
+        outer_fn,
+        outer_args,
+        Some(callback_fn),
+        stmt,
+        expected_type,
+        environment,
+        context,
+      ))
+
+      #([], context, environment, Expression(expr))
+    }
   }
 }
 
 fn init_inference_call(
+  function: glance.Expression,
+  args: List(glance.Field(glance.Expression)),
+  use_callback: Option(glance.Expression),
+  at_stmt: glance.Statement,
+  expected_type: Type,
+  environment: Dict(String, Type),
+  context: Context,
+) -> Result(#(Context, Expression), CompilerError) {
+  let #(context, arg_types) =
+    case use_callback {
+      Some(_) -> [Nil, ..list.map(args, fn(_) { Nil })]
+      None -> list.map(args, fn(_) { Nil })
+    }
+    |> list.map_fold(from: context, with: fn(context, _) {
+      fresh_type_variable(context)
+    })
+  let fn_type = FunctionType(arg_types, expected_type)
+  use #(context, function) <- result.try(init_inference(
+    function,
+    fn_type,
+    environment,
+    context,
+  ))
+  use args <- result.try(case function {
+    FunctionReference(_, FunctionFromModule(module_id, function_name)) -> {
+      // if we're calling a global function, look up the signature for labels
+      use signature <- result.try(
+        find_module_by_id(context.internals, module_id)
+        |> result.try(fn(module) { lookup(module.functions, function_name) }),
+      )
+      use paired <- result.try(pair_args(
+        signature,
+        args,
+        compiler.AtStatement(at_stmt),
+      ))
+      try_map_fold(over: paired, from: use_callback, with: fn(cb, p) {
+        case p, cb {
+          #(_t, Some(a)), _ -> Ok(#(cb, a))
+          _, Some(a) -> Ok(#(None, a))
+          _, _ -> Error(compiler.AnotherTypeError("Missing argument"))
+        }
+      })
+      |> result.try(fn(res) {
+        let #(cb, args) = res
+        case cb {
+          None -> Ok(args)
+          Some(_) ->
+            Error(compiler.ArityError(
+              compiler.AtStatement(at_stmt),
+              list.length(args),
+              list.length(args) + 1,
+            ))
+        }
+      })
+    }
+    _ -> {
+      // if we're not calling a global function, treat arguments as positional
+      list.try_map(
+        case use_callback {
+          Some(cb) -> list.append(args, [glance.Field(None, cb)])
+          None -> args
+        },
+        fn(arg) {
+          case arg.label {
+            Some(_) ->
+              Error(compiler.AnotherTypeError("Labeled args not allowed here"))
+            None -> Ok(arg.item)
+          }
+        },
+      )
+    }
+  })
+  init_inference_call_internal(function, arg_types, args, environment, context)
+}
+
+fn init_inference_call_internal(
   function: Expression,
   arg_types: List(Type),
   args: List(glance.Expression),
   environment: Dict(String, Type),
   context: Context,
 ) -> Result(#(Context, Expression), CompilerError) {
+  // TODO: use strict_zip?
   list.zip(args, arg_types)
   |> try_map_fold(from: context, with: fn(context, arg_pair) {
     let #(arg, arg_type) = arg_pair
@@ -878,7 +1042,7 @@ fn init_inference_call_builtin(
   let function_type = FunctionType(arg_types, return_type)
   let function =
     FunctionReference(function_type, BuiltInFunction(built_in_function))
-  init_inference_call(function, arg_types, args, environment, context)
+  init_inference_call_internal(function, arg_types, args, environment, context)
   |> result.map(fn(res) {
     let #(context, expr) = res
     #(add_constraint(context, Equal(expected_type, return_type)), expr)
@@ -1051,8 +1215,16 @@ fn init_inference_external_function(
 
   #(
     add_constraint(context, Equal(expected_type, signature_type(signature))),
-    Function(signature, def.parameters |> list.map(fn(p) { p.name }), external),
+    Function(signature, def.parameters |> list.map(param_to_arg_name), external),
   )
+}
+
+fn param_to_arg_name(param: glance.FunctionParameter) -> glance.AssignmentName {
+  param.name
+}
+
+fn fn_param_to_arg_name(param: glance.FnParameter) -> glance.AssignmentName {
+  param.name
 }
 
 fn init_inference_gleam_function(
@@ -1090,7 +1262,7 @@ fn init_inference_gleam_function(
           |> list.map(fn(p) { Labeled({ p.0 }.label, p.1) }),
         return_type,
       ),
-      def.parameters |> list.map(fn(p) { p.name }),
+      def.parameters |> list.map(param_to_arg_name),
       GleamBody(body),
     )
   #(context, fun)
@@ -1100,7 +1272,8 @@ pub fn infer_functions(
   internals: ModuleInternals,
   defs: List(glance.Definition(glance.Function)),
 ) -> Result(List(Function), CompilerError) {
-  let context = Context(internals, dict.new(), [], 1)
+  pprint.debug(list.map(defs, fn(def) { def.definition.name }))
+  let context = new_context(internals)
   let #(context, func_types) =
     list.map_fold(defs, context, fn(context, func) {
       fresh_type_variable(context)
@@ -1304,7 +1477,7 @@ pub fn init_inference(
       let fn_type = FunctionType(param_types, return_type)
       #(
         add_constraint(context, Equal(expected_type, fn_type)),
-        Fn(fn_type, list.map(args, fn(arg) { arg.name }), body),
+        Fn(fn_type, list.map(args, fn_param_to_arg_name), body),
       )
     }
     glance.RecordUpdate(maybe_module, constructor_name, record, fields) -> {
@@ -1403,51 +1576,15 @@ pub fn init_inference(
       })
     }
     glance.Call(function, args) -> {
-      // TODO: labeled arguments
-      let #(context, arg_types) =
-        args
-        |> list.map_fold(from: context, with: fn(context, _) {
-          fresh_type_variable(context)
-        })
-      let fn_type = FunctionType(arg_types, expected_type)
-      use #(context, function) <- result.try(init_inference(
+      init_inference_call(
         function,
-        fn_type,
+        args,
+        None,
+        glance.Expression(expr),
+        expected_type,
         environment,
         context,
-      ))
-      use args <- result.try(case function {
-        // TODO: any BuiltInFunction that needs to be supported?
-        FunctionReference(_, FunctionFromModule(module_id, function_name)) -> {
-          // if we're calling a global function, look up the signature for labels
-          use signature <- result.try(
-            find_module_by_id(context.internals, module_id)
-            |> result.try(fn(module) { lookup(module.functions, function_name) }),
-          )
-          use paired <- result.try(pair_args(
-            signature,
-            args,
-            compiler.AtExpression(expr),
-          ))
-          list.try_map(paired, fn(p) {
-            case p {
-              #(_t, Some(a)) -> Ok(a)
-              _ -> Error(compiler.AnotherTypeError("Missing argument"))
-            }
-          })
-        }
-        _ -> {
-          // if we're not calling a global function, treat arguments as positional
-          list.try_map(args, fn(arg) {
-            case arg.label {
-              Some(_) ->
-                Error(compiler.AnotherTypeError("Labeled args not allowed here"))
-              None -> Ok(arg.item)
-            }
-          })
-        }
-      })
-      init_inference_call(function, arg_types, args, environment, context)
+      )
     }
     glance.TupleIndex(tuple, index) -> {
       init_inference_call_builtin(
@@ -1569,10 +1706,11 @@ fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
     TypeVariable(i), TypeVariable(j) if i == j -> Ok(context)
     FunctionType(args_i, ret_i), FunctionType(args_j, ret_j) -> {
       case list.length(args_i) == list.length(args_j) {
-        False ->
+        False -> {
           Error(compiler.AnotherTypeError(
             "Unable to unify argument lists of different lengths",
           ))
+        }
         True -> {
           list.zip([ret_i, ..args_i], [ret_j, ..args_j])
           |> list.try_fold(from: context, with: fn(context, pair) {
@@ -1934,12 +2072,8 @@ pub fn infer(
   expr: glance.Expression,
   data: ModuleInternals,
 ) -> Result(Expression, CompilerError) {
-  init_inference(
-    expr,
-    TypeVariable("$1"),
-    dict.new(),
-    Context(data, dict.from_list([#("$1", TypeVariable("$1"))]), [], 2),
-  )
+  let #(context, type_var) = fresh_type_variable(new_context(data))
+  init_inference(expr, type_var, dict.new(), context)
   |> result.try(fn(initd) {
     let #(context, initd_fn) = initd
     solve_constraints(context)
@@ -2489,7 +2623,7 @@ fn analyze_high_level(
 
   use function_prototypes <- result.try(
     list.try_map(parsed.functions, fn(def) {
-      let context = Context(internals, dict.new(), [], 1)
+      let context = new_context(internals)
       let glance.Definition(
         definition: glance.Function(
           name:,

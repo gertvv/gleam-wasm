@@ -584,18 +584,14 @@ pub fn type_infer_function_test() {
       ],
     )
 
+  let #(context, type_var) =
+    analysis.fresh_type_variable(
+      analysis.new_context(empty_module_internals("foo", "bar")),
+    )
+
   let assert Ok(#(context, initd_fn)) =
     parsed_fn
-    |> analysis.init_inference(
-      analysis.TypeVariable("$1"),
-      dict.new(),
-      analysis.Context(
-        empty_module_internals("foo", "bar"),
-        dict.from_list([#("$1", analysis.TypeVariable("$1"))]),
-        [],
-        2,
-      ),
-    )
+    |> analysis.init_inference(type_var, dict.new(), context)
 
   initd_fn |> should.equal(fn_with_blanks)
   context.constraints |> should.equal(constraints)
@@ -712,21 +708,17 @@ pub fn type_infer_function_using_import_test() {
       ],
     )
 
+  let internals =
+    analysis.ModuleInternals(
+      ..empty_module_internals("foo", "bar"),
+      imports: dict.from_list([#("int", module_int)]),
+    )
+  let #(context, type_var) =
+    analysis.fresh_type_variable(analysis.new_context(internals))
+
   let assert Ok(#(context, initd_fn)) =
     parsed_fn
-    |> analysis.init_inference(
-      analysis.TypeVariable("$1"),
-      dict.new(),
-      analysis.Context(
-        analysis.ModuleInternals(
-          ..empty_module_internals("foo", "bar"),
-          imports: dict.from_list([#("int", module_int)]),
-        ),
-        dict.from_list([#("$1", analysis.TypeVariable("$1"))]),
-        [],
-        2,
-      ),
-    )
+    |> analysis.init_inference(type_var, dict.new(), context)
 
   initd_fn |> should.equal(fn_with_blanks)
   context.constraints |> should.equal(constraints)
@@ -744,20 +736,15 @@ pub fn type_infer_function_using_import_test() {
 }
 
 pub fn type_infer_function_with_return_annotation_test() {
+  let #(context, type_var) =
+    analysis.fresh_type_variable(
+      analysis.new_context(empty_module_internals("foo", "bar")),
+    )
   // fn() -> Int { 42 }
   glance.Fn([], Some(glance.NamedType("Int", None, [])), [
     glance.Expression(glance.Int("42")),
   ])
-  |> analysis.init_inference(
-    analysis.TypeVariable("$1"),
-    dict.from_list([]),
-    analysis.Context(
-      empty_module_internals("foo", "bar"),
-      dict.from_list([#("$1", analysis.TypeVariable("$1"))]),
-      [],
-      2,
-    ),
-  )
+  |> analysis.init_inference(type_var, dict.from_list([]), context)
   |> result.map(pair.second)
   |> should.equal(
     Ok(
@@ -767,25 +754,21 @@ pub fn type_infer_function_with_return_annotation_test() {
     ),
   )
 
+  let internals =
+    analysis.ModuleInternals(
+      ..empty_module_internals("foo", "bar"),
+      types: dict.from_list([
+        #("Bar", analysis.GenericType(analysis.int_type, [])),
+      ]),
+    )
+  let #(context, type_var) =
+    analysis.fresh_type_variable(analysis.new_context(internals))
+
   // fn() -> Bar { 42 }, where type Bar = Int
   glance.Fn([], Some(glance.NamedType("Bar", None, [])), [
     glance.Expression(glance.Int("42")),
   ])
-  |> analysis.init_inference(
-    analysis.TypeVariable("$1"),
-    dict.from_list([]),
-    analysis.Context(
-      analysis.ModuleInternals(
-        ..empty_module_internals("foo", "bar"),
-        types: dict.from_list([
-          #("Bar", analysis.GenericType(analysis.int_type, [])),
-        ]),
-      ),
-      dict.from_list([#("$1", analysis.TypeVariable("$1"))]),
-      [],
-      2,
-    ),
-  )
+  |> analysis.init_inference(type_var, dict.from_list([]), context)
   |> result.map(pair.second)
   |> should.equal(
     Ok(
@@ -1044,21 +1027,14 @@ pub fn type_infer_let_pattern_test() {
 }
 
 pub fn type_infer_list_pattern_test() {
-  let context =
-    analysis.Context(
-      empty_module_internals("foo", "bar"),
-      dict.from_list([#("$1", analysis.TypeVariable("$1"))]),
-      [],
-      2,
+  let #(context, type_var) =
+    analysis.fresh_type_variable(
+      analysis.new_context(empty_module_internals("foo", "bar")),
     )
 
   let assert Ok(#(new_context, empty_list_pattern)) =
     glance.PatternList([], None)
-    |> analysis.init_inference_pattern(
-      analysis.TypeVariable("$1"),
-      dict.new(),
-      context,
-    )
+    |> analysis.init_inference_pattern(type_var, dict.new(), context)
   empty_list_pattern
   |> should.equal(analysis.PatternWithVariables(
     analysis.PatternList(analysis.PatternEmpty),
@@ -1066,10 +1042,7 @@ pub fn type_infer_list_pattern_test() {
   ))
   new_context.constraints
   |> should.equal([
-    analysis.Equal(
-      analysis.TypeVariable("$1"),
-      analysis.list_type(analysis.TypeVariable("$2")),
-    ),
+    analysis.Equal(type_var, analysis.list_type(analysis.TypeVariable("$2"))),
   ])
 
   let assert Ok(#(new_context, singleton_list_pattern)) =
@@ -1171,6 +1144,9 @@ pub fn type_infer_constructor_pattern_test() {
       public_functions: set.new(),
     )
 
+  let #(context, type_var) =
+    analysis.fresh_type_variable(analysis.new_context(internals))
+
   let assert Ok(#(new_context, pattern)) =
     glance.PatternConstructor(
       None,
@@ -1178,16 +1154,7 @@ pub fn type_infer_constructor_pattern_test() {
       [glance.Field(Some("y"), glance.PatternString("str_val"))],
       True,
     )
-    |> analysis.init_inference_pattern(
-      analysis.TypeVariable("$1"),
-      dict.new(),
-      analysis.Context(
-        internals,
-        dict.from_list([#("$1", analysis.TypeVariable("$1"))]),
-        [],
-        2,
-      ),
-    )
+    |> analysis.init_inference_pattern(type_var, dict.new(), context)
 
   let variant_b_subst =
     analysis.substitute_signature(
@@ -1212,6 +1179,9 @@ pub fn type_infer_constructor_pattern_test() {
     analysis.Equal(analysis.TypeVariable("$2"), analysis.string_type),
   ])
 
+  let #(context, type_var) =
+    analysis.fresh_type_variable(analysis.new_context(internals))
+
   let assert Ok(#(_context, pattern)) =
     glance.PatternConstructor(
       None,
@@ -1222,16 +1192,7 @@ pub fn type_infer_constructor_pattern_test() {
       ],
       False,
     )
-    |> analysis.init_inference_pattern(
-      analysis.TypeVariable("$1"),
-      dict.new(),
-      analysis.Context(
-        internals,
-        dict.from_list([#("$1", analysis.TypeVariable("$1"))]),
-        [],
-        2,
-      ),
-    )
+    |> analysis.init_inference_pattern(type_var, dict.new(), context)
 
   pattern
   |> should.equal(analysis.PatternWithVariables(
@@ -1501,6 +1462,10 @@ pub fn list_inference_test() {
 }
 
 pub fn pipe_operator_to_call_test() {
+  let #(context, type_var) =
+    analysis.fresh_type_variable(
+      analysis.new_context(empty_module_internals("foo", "bar")),
+    )
   let assert Ok(#(context, expr)) =
     glance.BinaryOperator(
       glance.Pipe,
@@ -1510,13 +1475,13 @@ pub fn pipe_operator_to_call_test() {
       ]),
     )
     |> analysis.init_inference(
-      analysis.TypeVariable("$1"),
+      type_var,
       dict.from_list([
         #("lst", analysis.TypeVariable("a")),
         #("map", analysis.TypeVariable("b")),
         #("fun", analysis.TypeVariable("c")),
       ]),
-      analysis.Context(empty_module_internals("foo", "bar"), dict.new(), [], 2),
+      context,
     )
 
   context.constraints
@@ -1542,6 +1507,10 @@ pub fn pipe_operator_to_call_test() {
 }
 
 pub fn pipe_operator_to_var_test() {
+  let #(context, type_var) =
+    analysis.fresh_type_variable(
+      analysis.new_context(empty_module_internals("foo", "bar")),
+    )
   let assert Ok(#(context, expr)) =
     glance.BinaryOperator(
       glance.Pipe,
@@ -1549,12 +1518,12 @@ pub fn pipe_operator_to_var_test() {
       glance.Variable("fun"),
     )
     |> analysis.init_inference(
-      analysis.TypeVariable("$1"),
+      type_var,
       dict.from_list([
         #("lst", analysis.TypeVariable("a")),
         #("fun", analysis.TypeVariable("b")),
       ]),
-      analysis.Context(empty_module_internals("foo", "bar"), dict.new(), [], 2),
+      context,
     )
 
   context.constraints
@@ -1578,6 +1547,10 @@ pub fn pipe_operator_to_var_test() {
 }
 
 pub fn fn_capture_test() {
+  let #(context, type_var) =
+    analysis.fresh_type_variable(
+      analysis.new_context(empty_module_internals("foo", "bar")),
+    )
   let assert Ok(#(context, expr)) =
     glance.FnCapture(
       None,
@@ -1586,13 +1559,13 @@ pub fn fn_capture_test() {
       [glance.Field(None, glance.Variable("y"))],
     )
     |> analysis.init_inference(
-      analysis.TypeVariable("$1"),
+      type_var,
       dict.from_list([
         #("fun", analysis.TypeVariable("a")),
         #("x", analysis.int_type),
         #("y", analysis.int_type),
       ]),
-      analysis.Context(empty_module_internals("foo", "bar"), dict.new(), [], 2),
+      context,
     )
 
   expr
@@ -1640,6 +1613,146 @@ pub fn fn_capture_test() {
   ])
 }
 
+fn funcref(signature, module_id) {
+  analysis.FunctionReference(
+    analysis.signature_type(signature),
+    analysis.FunctionFromModule(module_id, signature.name),
+  )
+}
+
+pub fn infer_use_test() {
+  // TODO: factor out fold -- duplicated with next test
+  let tv_a = analysis.TypeVariable("a")
+  let tv_b = analysis.TypeVariable("b")
+  let fold_signature =
+    analysis.FunctionSignature(
+      "fold",
+      [],
+      [
+        analysis.Labeled("over", analysis.list_type(tv_a)),
+        analysis.Labeled("from", tv_b),
+        analysis.Labeled("with", analysis.FunctionType([tv_b, tv_a], tv_b)),
+      ],
+      tv_b,
+    )
+
+  let internals =
+    analysis.ModuleInternals(
+      ..empty_module_internals("gleam_stdlib", "gleam/list"),
+      functions: dict.from_list([#("fold", fold_signature)]),
+    )
+
+  // TODO: $6 is very arbitrary and not what's specified in the source
+  let var_c = analysis.TypeVariable("$6")
+
+  let weird_reverse = fn(over_label, from_label) {
+    glance.Definition(
+      [],
+      glance.Function(
+        "reverse",
+        glance.Public,
+        [
+          glance.FunctionParameter(
+            None,
+            glance.Named("lst"),
+            Some(glance.NamedType("List", None, [glance.VariableType("a")])),
+          ),
+        ],
+        Some(glance.NamedType("List", None, [glance.VariableType("a")])),
+        [
+          glance.Use(
+            [glance.PatternVariable("acc"), glance.PatternVariable("item")],
+            glance.Call(glance.Variable("fold"), [
+              glance.Field(over_label, glance.Variable("lst")),
+              glance.Field(from_label, glance.List([], None)),
+            ]),
+          ),
+          glance.Expression(glance.List(
+            [glance.Variable("item")],
+            Some(glance.Variable("acc")),
+          )),
+        ],
+        glance.Span(0, 1),
+      ),
+    )
+  }
+
+  let weird_reverse_typed =
+    analysis.Function(
+      analysis.FunctionSignature(
+        "reverse",
+        [analysis.list_type(var_c)],
+        [],
+        analysis.list_type(var_c),
+      ),
+      [glance.Named("lst")],
+      analysis.GleamBody([
+        analysis.Expression(
+          analysis.Call(
+            funcref(
+              analysis.substitute_signature(
+                fold_signature,
+                dict.from_list([
+                  #("a", var_c),
+                  #("b", analysis.list_type(var_c)),
+                ]),
+              ),
+              project.SourceLocation("gleam_stdlib", "gleam/list"),
+            ),
+            [
+              analysis.Variable(analysis.list_type(var_c), "lst"),
+              analysis.Call(
+                analysis.FunctionReference(
+                  analysis.FunctionType([], analysis.list_type(var_c)),
+                  analysis.BuiltInFunction(analysis.EmptyListConstructor),
+                ),
+                [],
+              ),
+              analysis.Fn(
+                analysis.FunctionType(
+                  [analysis.list_type(var_c), var_c],
+                  analysis.list_type(var_c),
+                ),
+                [glance.Named("acc"), glance.Named("item")],
+                [
+                  analysis.Expression(
+                    analysis.Call(
+                      analysis.FunctionReference(
+                        analysis.FunctionType(
+                          [var_c, analysis.list_type(var_c)],
+                          analysis.list_type(var_c),
+                        ),
+                        analysis.BuiltInFunction(
+                          analysis.NonEmptyListConstructor,
+                        ),
+                      ),
+                      [
+                        analysis.Variable(var_c, "item"),
+                        analysis.Variable(analysis.list_type(var_c), "acc"),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ]),
+    )
+
+  weird_reverse(Some("over"), Some("from"))
+  |> analysis.infer_function(internals, _)
+  |> should.equal(Ok(weird_reverse_typed))
+
+  weird_reverse(None, None)
+  |> analysis.infer_function(internals, _)
+  |> should.equal(Ok(weird_reverse_typed))
+
+  weird_reverse(None, Some("from"))
+  |> analysis.infer_function(internals, _)
+  |> should.equal(Ok(weird_reverse_typed))
+}
+
 pub fn infer_function_test() {
   let tv_a = analysis.TypeVariable("a")
   let tv_b = analysis.TypeVariable("b")
@@ -1662,15 +1775,7 @@ pub fn infer_function_test() {
       tv_b,
     )
 
-  let funcref = fn(sig) {
-    analysis.FunctionReference(
-      analysis.signature_type(sig),
-      analysis.FunctionFromModule(
-        project.SourceLocation("foo", "bar"),
-        sig.name,
-      ),
-    )
-  }
+  let module_id = project.SourceLocation("foo", "bar")
 
   let sum_expected =
     Ok(analysis.Function(
@@ -1684,17 +1789,20 @@ pub fn infer_function_test() {
       analysis.GleamBody([
         analysis.Expression(
           analysis.Call(
-            funcref(analysis.substitute_signature(
-              fold,
-              dict.from_list([
-                #("a", analysis.int_type),
-                #("b", analysis.int_type),
-              ]),
-            )),
+            funcref(
+              analysis.substitute_signature(
+                fold,
+                dict.from_list([
+                  #("a", analysis.int_type),
+                  #("b", analysis.int_type),
+                ]),
+              ),
+              module_id,
+            ),
             [
               analysis.Variable(analysis.list_type(analysis.int_type), "lst"),
               analysis.Int("0"),
-              funcref(add),
+              funcref(add, module_id),
             ],
           ),
         ),
@@ -2030,6 +2138,18 @@ pub fn fun_with_options_test() {
     internals,
     "pub fn none() -> Option(List(a)) {
       None
+    }",
+  )
+  |> result.is_ok
+  |> should.equal(True)
+}
+
+pub fn call_zero_arg_function_test() {
+  let internals = empty_module_internals("foo", "bar")
+  infer_single_function(
+    internals,
+    "pub fn my_fn(with callback: fn() -> Int) -> Int {
+      callback()
     }",
   )
   |> result.is_ok
