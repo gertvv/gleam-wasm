@@ -2031,13 +2031,22 @@ pub fn result_test() {
   |> should.equal(True)
 }
 
-fn infer_single_function(internals: analysis.ModuleInternals, code: String) {
+fn parse_single_function(
+  code: String,
+) -> Result(glance.Definition(glance.Function), compiler.CompilerError) {
   glance.module(code)
   |> result.map_error(compiler.ParseError)
   |> result.try(fn(module) {
     list.first(module.functions)
     |> result.replace_error(compiler.AnotherTypeError("No function found"))
   })
+}
+
+fn infer_single_function(
+  internals: analysis.ModuleInternals,
+  code: String,
+) -> Result(analysis.Function, compiler.CompilerError) {
+  parse_single_function(code)
   |> result.try(fn(def) { analysis.infer_function(internals, def) })
 }
 
@@ -2150,6 +2159,23 @@ pub fn call_zero_arg_function_test() {
     internals,
     "pub fn my_fn(with callback: fn() -> Int) -> Int {
       callback()
+    }",
+  )
+  |> result.is_ok
+  |> should.equal(True)
+}
+
+pub fn tuple_index_looping_test() {
+  // This created an infinite loop somehow of $8 -> a -> $8 -> ... substitution
+  infer_single_function(
+    empty_module_internals("foo", "bar"),
+    "fn shuffle_pair_unwrap_loop(list: List(#(Float, a)), acc: List(a)) -> List(a) {
+      case list {
+        [] -> acc
+        [elem_pair, ..enumerable] -> {
+          shuffle_pair_unwrap_loop(enumerable, [elem_pair.1, ..acc])
+        }
+      }
     }",
   )
   |> result.is_ok

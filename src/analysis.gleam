@@ -1892,7 +1892,8 @@ pub fn solve_constraints(
         |> result.replace_error(compiler.AnotherTypeError(
           "Tuple does not have element at the given index",
         ))
-        |> result.try(unify(context, _, field_type))
+        // TODO: if I put field_type third rather than second I get infinite loops?
+        |> result.try(unify(context, field_type, _))
       }
     }
   })
