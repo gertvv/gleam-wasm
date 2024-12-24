@@ -1636,15 +1636,6 @@ pub fn infer_use_test() {
       tv_b,
     )
 
-  let internals =
-    analysis.ModuleInternals(
-      ..empty_module_internals("gleam_stdlib", "gleam/list"),
-      functions: dict.from_list([#("fold", fold_signature)]),
-    )
-
-  // TODO: $6 is very arbitrary and not what's specified in the source
-  let var_c = analysis.TypeVariable("$6")
-
   let weird_reverse = fn(over_label, from_label) {
     glance.Definition(
       [],
@@ -1676,6 +1667,23 @@ pub fn infer_use_test() {
       ),
     )
   }
+
+  use signature <- result.map(analysis.prototype_function_signature(
+    empty_module_internals("gleam_stdlib", "gleam/list"),
+    weird_reverse(None, None),
+  ))
+
+  let internals =
+    analysis.ModuleInternals(
+      ..empty_module_internals("gleam_stdlib", "gleam/list"),
+      functions: dict.from_list([
+        #("fold", fold_signature),
+        #("reverse", signature),
+      ]),
+    )
+
+  // TODO: $5 is very arbitrary and not what's specified in the source
+  let var_c = analysis.TypeVariable("$5")
 
   let weird_reverse_typed =
     analysis.Function(
@@ -1775,6 +1783,14 @@ pub fn infer_function_test() {
       tv_b,
     )
 
+  let sum =
+    analysis.FunctionSignature(
+      "sum",
+      [analysis.TypeVariable("a")],
+      [],
+      analysis.TypeVariable("b"),
+    )
+
   let module_id = project.SourceLocation("foo", "bar")
 
   let sum_expected =
@@ -1813,7 +1829,7 @@ pub fn infer_function_test() {
   analysis.infer_function(
     analysis.ModuleInternals(
       ..empty_module_internals("foo", "bar"),
-      functions: dict.from_list([#("add", add), #("fold", fold)]),
+      functions: dict.from_list([#("add", add), #("fold", fold), #("sum", sum)]),
     ),
     glance.Definition(
       [],
@@ -1841,7 +1857,7 @@ pub fn infer_function_test() {
   analysis.infer_function(
     analysis.ModuleInternals(
       ..empty_module_internals("foo", "bar"),
-      functions: dict.from_list([#("add", add), #("fold", fold)]),
+      functions: dict.from_list([#("add", add), #("fold", fold), #("sum", sum)]),
     ),
     glance.Definition(
       [],
@@ -1869,7 +1885,7 @@ pub fn infer_function_test() {
   analysis.infer_function(
     analysis.ModuleInternals(
       ..empty_module_internals("foo", "bar"),
-      functions: dict.from_list([#("add", add), #("fold", fold)]),
+      functions: dict.from_list([#("add", add), #("fold", fold), #("sum", sum)]),
     ),
     glance.Definition(
       [],
@@ -1931,35 +1947,25 @@ pub fn no_arg_constructor_test() {
         order.variants |> list.map(fn(variant) { #(variant.name, variant) }),
       ),
     )
-  "pub fn less_than() -> Order {
-    Lt
-  }"
-  |> glance.module
-  |> result.replace_error(Nil)
-  |> result.try(fn(module) {
-    list.find(module.functions, fn(fun) { fun.definition.name == "less_than" })
-  })
-  |> result.replace_error(compiler.AnotherTypeError("Sorry!"))
-  |> result.try(analysis.infer_function(internals, _))
-  |> result.is_ok
-  |> should.equal(True)
+  infer_single_function(
+    internals,
+    "pub fn less_than() -> Order {
+      Lt
+    }",
+  )
+  |> should.be_ok
 
-  "pub fn to_int(order: Order) {
-    case order {
-      Lt -> -1
-      Eq -> 0
-      Gt -> 1
-    }
-  }"
-  |> glance.module
-  |> result.replace_error(Nil)
-  |> result.try(fn(module) {
-    list.find(module.functions, fn(fun) { fun.definition.name == "to_int" })
-  })
-  |> result.replace_error(compiler.AnotherTypeError("Sorry!"))
-  |> result.try(analysis.infer_function(internals, _))
-  |> result.is_ok
-  |> should.equal(True)
+  infer_single_function(
+    internals,
+    "pub fn to_int(order: Order) {
+      case order {
+        Lt -> -1
+        Eq -> 0
+        Gt -> 1
+      }
+    }",
+  )
+  |> should.be_ok
 }
 
 pub fn result_test() {
@@ -2022,13 +2028,23 @@ pub fn result_test() {
       ),
     )
   }
+  let assert Ok(signature) =
+    analysis.prototype_function_signature(
+      internals,
+      make_fn("Ok", glance.Float("3.14")),
+    )
+
+  let internals =
+    analysis.ModuleInternals(
+      ..internals,
+      functions: dict.insert(internals.functions, "func", signature),
+    )
+
   analysis.infer_function(internals, make_fn("Ok", glance.Float("3.14")))
-  |> result.is_ok
-  |> should.equal(True)
+  |> should.be_ok
 
   analysis.infer_function(internals, make_fn("Error", glance.Int("42")))
-  |> result.is_ok
-  |> should.equal(True)
+  |> should.be_ok
 }
 
 fn parse_single_function(
@@ -2047,7 +2063,18 @@ fn infer_single_function(
   code: String,
 ) -> Result(analysis.Function, compiler.CompilerError) {
   parse_single_function(code)
-  |> result.try(fn(def) { analysis.infer_function(internals, def) })
+  |> result.try(fn(def) {
+    analysis.prototype_function_signature(internals, def)
+    |> result.try(fn(signature) {
+      analysis.infer_function(
+        analysis.ModuleInternals(
+          ..internals,
+          functions: dict.insert(internals.functions, signature.name, signature),
+        ),
+        def,
+      )
+    })
+  })
 }
 
 pub fn external_test() {
@@ -2117,6 +2144,11 @@ pub fn fun_with_options_test() {
       analysis.TypeFromModule(internals.location, "Option"),
       [analysis.TypeVariable("a")],
     )
+  let list_option_type =
+    analysis.TypeConstructor(
+      analysis.TypeFromModule(internals.location, "Option"),
+      [analysis.list_type(analysis.TypeVariable("a"))],
+    )
   let internals =
     analysis.ModuleInternals(
       ..internals,
@@ -2125,6 +2157,16 @@ pub fn fun_with_options_test() {
       ]),
       functions: dict.from_list([
         #("None", analysis.FunctionSignature("None", [], [], option_type)),
+        #(
+          "is_none",
+          analysis.FunctionSignature(
+            "is_none",
+            [option_type],
+            [],
+            analysis.bool_type,
+          ),
+        ),
+        #("none", analysis.FunctionSignature("none", [], [], list_option_type)),
       ]),
     )
 
@@ -2137,8 +2179,7 @@ pub fn fun_with_options_test() {
       option == None
     }",
   )
-  |> result.is_ok
-  |> should.equal(True)
+  |> should.be_ok
 
   // TODO: add a proper test for this scenario:
   // The type variable in the None signature wasn't being substituted in the
@@ -2149,8 +2190,7 @@ pub fn fun_with_options_test() {
       None
     }",
   )
-  |> result.is_ok
-  |> should.equal(True)
+  |> should.be_ok
 }
 
 pub fn call_zero_arg_function_test() {
@@ -2161,8 +2201,7 @@ pub fn call_zero_arg_function_test() {
       callback()
     }",
   )
-  |> result.is_ok
-  |> should.equal(True)
+  |> should.be_ok
 }
 
 pub fn tuple_index_looping_test() {
@@ -2178,6 +2217,18 @@ pub fn tuple_index_looping_test() {
       }
     }",
   )
-  |> result.is_ok
-  |> should.equal(True)
+  |> should.be_ok
+}
+
+pub fn recursive_func_with_labeled_args_test() {
+  infer_single_function(
+    empty_module_internals("foo", "bar"),
+    "fn fold(over list: List(a), from initial: b, with fun: fn(b, a) -> b) -> b {
+      case list {
+        [] -> initial
+        [head, ..tail] -> fold(over: tail, from: fun(initial, head), with: fun)
+      }
+    }",
+  )
+  |> should.be_ok
 }

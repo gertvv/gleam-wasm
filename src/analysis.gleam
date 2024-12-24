@@ -1274,18 +1274,17 @@ pub fn infer_functions(
 ) -> Result(List(Function), CompilerError) {
   pprint.debug(list.map(defs, fn(def) { def.definition.name }))
   let context = new_context(internals)
-  let #(context, func_types) =
-    list.map_fold(defs, context, fn(context, func) {
-      fresh_type_variable(context)
-      |> pair.map_second(fn(t) { #(func.definition.name, t) })
-    })
-  let environment = dict.from_list(func_types)
+  use func_types <- result.try(
+    list.try_map(defs, fn(func) {
+      lookup(internals.functions, func.definition.name)
+      |> result.map(signature_type)
+    }),
+  )
   use #(context, functions) <- result.try(
-    list.map(func_types, pair.second)
-    |> list.zip(defs)
+    list.zip(func_types, defs)
     |> try_map_fold(from: context, with: fn(context, pair) {
       let #(typ, def) = pair
-      init_inference_function(def, typ, environment, context)
+      init_inference_function(def, typ, dict.new(), context)
     }),
   )
   solve_constraints(context)
@@ -2515,6 +2514,45 @@ pub fn resolve_types(
   )
 }
 
+pub fn prototype_function_signature(
+  internals: ModuleInternals,
+  def: glance.Definition(glance.Function),
+) -> Result(FunctionSignature, CompilerError) {
+  let context = new_context(internals)
+  let glance.Definition(
+    definition: glance.Function(
+      name:,
+      parameters:,
+      return:,
+      ..,
+    ),
+    ..,
+  ) = def
+  use #(pos_args, lab_args) <- result.try(
+    list.map(parameters, fn(param) {
+      let glance.FunctionParameter(label:, type_:, ..) = param
+      glance.Field(label, type_)
+    })
+    |> separate_positional_and_labeled,
+  )
+  use #(context, pos_args) <- result.try(
+    pos_args |> try_map_fold(context, resolve_optional_type),
+  )
+  use #(context, lab_args) <- result.try(
+    lab_args
+    |> try_map_fold(context, fn(context, arg) {
+      let Labeled(name, typ) = arg
+      resolve_optional_type(context, typ)
+      |> result.map(fn(res) {
+        let #(context, typ) = res
+        #(context, Labeled(name, typ))
+      })
+    }),
+  )
+  use #(_context, return) <- result.map(resolve_optional_type(context, return))
+  FunctionSignature(name, pos_args, lab_args, return)
+}
+
 fn analyze_high_level(
   project: Project,
   location: ModuleId,
@@ -2624,42 +2662,8 @@ fn analyze_high_level(
 
   use function_prototypes <- result.try(
     list.try_map(parsed.functions, fn(def) {
-      let context = new_context(internals)
-      let glance.Definition(
-        definition: glance.Function(
-          name:,
-          parameters:,
-          return:,
-          ..,
-        ),
-        ..,
-      ) = def
-      use #(pos_args, lab_args) <- result.try(
-        list.map(parameters, fn(param) {
-          let glance.FunctionParameter(label:, type_:, ..) = param
-          glance.Field(label, type_)
-        })
-        |> separate_positional_and_labeled,
-      )
-      use #(context, pos_args) <- result.try(
-        pos_args |> try_map_fold(context, resolve_optional_type),
-      )
-      use #(context, lab_args) <- result.try(
-        lab_args
-        |> try_map_fold(context, fn(context, arg) {
-          let Labeled(name, typ) = arg
-          resolve_optional_type(context, typ)
-          |> result.map(fn(res) {
-            let #(context, typ) = res
-            #(context, Labeled(name, typ))
-          })
-        }),
-      )
-      use #(_context, return) <- result.map(resolve_optional_type(
-        context,
-        return,
-      ))
-      #(name, FunctionSignature(name, pos_args, lab_args, return))
+      prototype_function_signature(internals, def)
+      |> result.map(fn(signature) { #(signature.name, signature) })
     })
     |> result.map(dict.from_list),
   )
