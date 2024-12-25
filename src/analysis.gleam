@@ -890,13 +890,16 @@ fn init_inference_call(
     environment,
     context,
   ))
-  use args <- result.try(case function {
+  use #(context, args) <- result.try(case function {
     FunctionReference(_, FunctionFromModule(module_id, function_name)) -> {
       // if we're calling a global function, look up the signature for labels
       use signature <- result.try(
         find_module_by_id(context.internals, module_id)
         |> result.try(fn(module) { lookup(module.functions, function_name) }),
       )
+      // TODO: inject fresh type variables -- check if safe
+      let #(context, signature) =
+        signature_replace_free_type_variables(signature, context)
       use paired <- result.try(pair_args(
         signature,
         args,
@@ -912,7 +915,7 @@ fn init_inference_call(
       |> result.try(fn(res) {
         let #(cb, args) = res
         case cb {
-          None -> Ok(args)
+          None -> Ok(#(context, args))
           Some(_) ->
             Error(compiler.ArityError(
               compiler.AtStatement(at_stmt),
@@ -937,6 +940,7 @@ fn init_inference_call(
           }
         },
       )
+      |> result.map(fn(args) { #(context, args) })
     }
   })
   init_inference_call_internal(function, arg_types, args, environment, context)
@@ -1098,12 +1102,33 @@ pub fn init_inference_clause(
     )),
   )
   use <- bool.guard(
-    when: list.any(alternative_variables, fn(vars) { vars != variables }),
+    when: list.any(alternative_variables, fn(vars) {
+      dict.keys(vars) != dict.keys(variables)
+    }),
     return: Error(compiler.AnotherTypeError(
       "All alternative patterns must set the same variables",
     )),
   )
   let environment = dict.merge(environment, variables)
+
+  // variables in alternative patterns must have the same type
+  let sort_variable_types = fn(variables) {
+    dict.to_list(variables)
+    |> list.sort(fn(a, b) { string.compare(a.0, b.0) })
+    |> list.map(pair.second)
+  }
+  let sorted_types = sort_variable_types(variables)
+  let context =
+    list.drop(alternative_variables, 1)
+    |> list.fold(context, fn(context, other_variables) {
+      sort_variable_types(other_variables)
+      |> list.zip(sorted_types)
+      |> list.fold(context, fn(context, pair) {
+        let #(t1, t2) = pair
+        add_constraint(context, Equal(t1, t2))
+      })
+    })
+
   // construct the guard expression
   use #(context, guard) <- result.try(case guard {
     None ->
@@ -1274,12 +1299,17 @@ pub fn infer_functions(
 ) -> Result(List(Function), CompilerError) {
   pprint.debug(list.map(defs, fn(def) { def.definition.name }))
   let context = new_context(internals)
-  use func_types <- result.try(
-    list.try_map(defs, fn(func) {
-      lookup(internals.functions, func.definition.name)
-      |> result.map(signature_type)
-    }),
-  )
+  // TODO: problem! new_context may not be appropriate if functions have been prototyped before... re-prototype?
+  //use func_types <- result.try(
+  //  list.try_map(defs, fn(func) {
+  //    lookup(internals.functions, func.definition.name)
+  //    |> result.map(signature_type)
+  //  }),
+  //)
+  let #(context, func_types) =
+    list.map_fold(defs, context, fn(context, _def) {
+      fresh_type_variable(context)
+    })
   use #(context, functions) <- result.try(
     list.zip(func_types, defs)
     |> try_map_fold(from: context, with: fn(context, pair) {
@@ -1308,8 +1338,9 @@ fn maybe_call_no_arg_constructor(
   expected_type: Type,
   context: Context,
 ) -> #(Context, Expression) {
-  let #(context, function_type) =
-    replace_free_type_variables(signature_type(signature), context)
+  let #(context, signature) =
+    signature_replace_free_type_variables(signature, context)
+  let function_type = signature_type(signature)
   let func_ref =
     FunctionReference(
       function_type,
@@ -1674,19 +1705,18 @@ pub fn init_inference(
   }
 }
 
-pub fn get_sub(context: Context, t: Type) -> Option(Type) {
+pub fn get_sub(context: Context, t: Type) -> Result(Type, Nil) {
   case t {
     TypeVariable(i) ->
       dict.get(context.substitution, i)
-      |> result.map(fn(r) {
+      |> result.try(fn(r) {
         // TODO: worry about infinite recursion?
         case r {
-          TypeVariable(j) if i != j -> get_sub(context, r)
-          _ -> Some(r)
+          TypeVariable(j) if i != j -> get_sub(context, r) |> result.or(Ok(r))
+          _ -> Ok(r)
         }
       })
-      |> result.unwrap(None)
-    _ -> None
+    _ -> Error(Nil)
   }
 }
 
@@ -1699,8 +1729,8 @@ fn occurs_in(var: String, t: Type) -> Bool {
 }
 
 fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
-  let sub_a = get_sub(context, a) |> option.unwrap(a)
-  let sub_b = get_sub(context, b) |> option.unwrap(b)
+  let sub_a = get_sub(context, a)
+  let sub_b = get_sub(context, b)
   case a, b {
     TypeVariable(i), TypeVariable(j) if i == j -> Ok(context)
     FunctionType(args_i, ret_i), FunctionType(args_j, ret_j) -> {
@@ -1718,9 +1748,15 @@ fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
         }
       }
     }
-    TypeVariable(_), _ if sub_a != a -> unify(context, sub_a, b)
-    _, TypeVariable(_) if sub_b != b -> unify(context, a, sub_b)
-    TypeVariable(i), _ ->
+    TypeVariable(_), _ if sub_a != Error(Nil) && sub_a != Ok(a) -> {
+      let assert Ok(sub_a) = sub_a
+      unify(context, sub_a, b)
+    }
+    _, TypeVariable(_) if sub_b != Error(Nil) && sub_b != Ok(b) -> {
+      let assert Ok(sub_b) = sub_b
+      unify(context, a, sub_b)
+    }
+    TypeVariable(i), _ if sub_a != Error(Nil) ->
       case occurs_in(i, b) {
         True ->
           Error(compiler.AnotherTypeError(
@@ -1728,7 +1764,7 @@ fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
           ))
         False -> Ok(add_substitution(context, i, b))
       }
-    _, TypeVariable(j) ->
+    _, TypeVariable(j) if sub_b != Error(Nil) ->
       case occurs_in(j, a) {
         True ->
           Error(compiler.AnotherTypeError(
@@ -1736,6 +1772,12 @@ fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
           ))
         False -> Ok(add_substitution(context, j, a))
       }
+    TypeVariable(_), _ | _, TypeVariable(_) -> {
+      pprint.debug(#(context.substitution, a, sub_a, b, sub_b))
+      Error(compiler.AnotherTypeError(
+        "Could not find a substitutable type variable",
+      ))
+    }
     TypeConstructor(id_i, args_i), TypeConstructor(id_j, args_j) -> {
       case id_i == id_j && list.length(args_i) == list.length(args_j) {
         False -> {
@@ -1788,15 +1830,13 @@ pub fn solve_constraints(
             ))
           TypeVariable(_) ->
             case get_sub(context, container_type) {
-              None ->
+              Error(Nil) ->
                 Error(compiler.AnotherTypeError(
                   "Type variable does not have substitution",
                 ))
-              Some(TypeConstructor(
-                TypeFromModule(module_id, type_name),
-                _params,
-              )) -> Ok(#(module_id, type_name))
-              Some(_) -> {
+              Ok(TypeConstructor(TypeFromModule(module_id, type_name), _params)) ->
+                Ok(#(module_id, type_name))
+              Ok(_) -> {
                 Error(compiler.AnotherTypeError("Unexpected container type"))
               }
             }
@@ -1840,16 +1880,13 @@ pub fn solve_constraints(
             ))
           TypeVariable(_) ->
             case get_sub(context, container_type) {
-              None ->
+              Error(Nil) ->
                 Error(compiler.AnotherTypeError(
                   "No substitution for type variable",
                 ))
-              Some(TypeConstructor(BuiltInType(TupleType(_n)), params)) ->
+              Ok(TypeConstructor(BuiltInType(TupleType(_n)), params)) ->
                 Ok(params)
-              Some(TypeConstructor(
-                TypeFromModule(module_id, type_name),
-                _params,
-              )) -> {
+              Ok(TypeConstructor(TypeFromModule(module_id, type_name), _params)) -> {
                 // TODO: do I need to worry about the type params?
                 case maybe_variant {
                   Some(variant_name) -> {
@@ -1878,7 +1915,7 @@ pub fn solve_constraints(
                     ))
                 }
               }
-              Some(_) ->
+              Ok(_) ->
                 Error(compiler.AnotherTypeError(
                   "Unexpected type for ByPosition indexing",
                 ))

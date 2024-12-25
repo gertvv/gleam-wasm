@@ -1682,16 +1682,15 @@ pub fn infer_use_test() {
       ]),
     )
 
-  // TODO: $5 is very arbitrary and not what's specified in the source
-  let var_c = analysis.TypeVariable("$5")
+  let var_a = analysis.TypeVariable("a")
 
   let weird_reverse_typed =
     analysis.Function(
       analysis.FunctionSignature(
         "reverse",
-        [analysis.list_type(var_c)],
+        [analysis.list_type(var_a)],
         [],
-        analysis.list_type(var_c),
+        analysis.list_type(var_a),
       ),
       [glance.Named("lst")],
       analysis.GleamBody([
@@ -1701,25 +1700,25 @@ pub fn infer_use_test() {
               analysis.substitute_signature(
                 fold_signature,
                 dict.from_list([
-                  #("a", var_c),
-                  #("b", analysis.list_type(var_c)),
+                  #("a", var_a),
+                  #("b", analysis.list_type(var_a)),
                 ]),
               ),
               project.SourceLocation("gleam_stdlib", "gleam/list"),
             ),
             [
-              analysis.Variable(analysis.list_type(var_c), "lst"),
+              analysis.Variable(analysis.list_type(var_a), "lst"),
               analysis.Call(
                 analysis.FunctionReference(
-                  analysis.FunctionType([], analysis.list_type(var_c)),
+                  analysis.FunctionType([], analysis.list_type(var_a)),
                   analysis.BuiltInFunction(analysis.EmptyListConstructor),
                 ),
                 [],
               ),
               analysis.Fn(
                 analysis.FunctionType(
-                  [analysis.list_type(var_c), var_c],
-                  analysis.list_type(var_c),
+                  [analysis.list_type(var_a), var_a],
+                  analysis.list_type(var_a),
                 ),
                 [glance.Named("acc"), glance.Named("item")],
                 [
@@ -1727,16 +1726,16 @@ pub fn infer_use_test() {
                     analysis.Call(
                       analysis.FunctionReference(
                         analysis.FunctionType(
-                          [var_c, analysis.list_type(var_c)],
-                          analysis.list_type(var_c),
+                          [var_a, analysis.list_type(var_a)],
+                          analysis.list_type(var_a),
                         ),
                         analysis.BuiltInFunction(
                           analysis.NonEmptyListConstructor,
                         ),
                       ),
                       [
-                        analysis.Variable(var_c, "item"),
-                        analysis.Variable(analysis.list_type(var_c), "acc"),
+                        analysis.Variable(var_a, "item"),
+                        analysis.Variable(analysis.list_type(var_a), "acc"),
                       ],
                     ),
                   ),
@@ -2228,6 +2227,51 @@ pub fn recursive_func_with_labeled_args_test() {
         [] -> initial
         [head, ..tail] -> fold(over: tail, from: fun(initial, head), with: fun)
       }
+    }",
+  )
+  |> should.be_ok
+}
+
+pub fn infer_function_without_annotations_test() {
+  // this example used to generate a constraint of the form
+  // FunctionType([$2], $1) == FunctionType([$1], $2)
+  infer_single_function(
+    empty_module_internals("foo", "bar"),
+    "fn non_annotated(list) {
+      case list {
+        [] -> 0
+        [first, ..rest] -> 0 
+      }
+    }",
+  )
+  |> should.be_ok
+  // TODO: expand the expectation
+}
+
+pub fn infer_with_alternative_patterns_test() {
+  let assert Ok(analysis.Function(
+    analysis.FunctionSignature("alts", [arg_1_type, arg_2_type], _, _),
+    ..,
+  )) =
+    infer_single_function(
+      empty_module_internals("foo", "bar"),
+      "fn alts(list1, list2) {
+      case list1, list2 {
+        [], list | list, [] -> 0
+        [head1, ..tail1], [head2, ..tail2] -> 1 
+      }
+    }",
+    )
+  arg_2_type |> should.equal(arg_1_type)
+}
+
+pub fn bla_test() {
+  // compiling this requires treating declared type parameters as
+  // not-substitutable
+  infer_single_function(
+    empty_module_internals("foo", "bar"),
+    "pub fn prepend(to list: List(a), this item: a) -> List(a) {
+      [item, ..list]
     }",
   )
   |> should.be_ok
