@@ -1,8 +1,8 @@
+import gleam/int
+import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/string_builder.{type StringBuilder, from_string as sb}
-import gleam/io
-import gleam/int
+import gleam/string_tree.{type StringTree, from_string as sb}
 
 pub type WatModule =
   List(WatDefinition)
@@ -76,36 +76,36 @@ pub type WatExpression {
   Unreachable
 }
 
-fn indent_more(indent: StringBuilder) -> StringBuilder {
-  string_builder.append(indent, "  ")
+fn indent_more(indent: StringTree) -> StringTree {
+  string_tree.append(indent, "  ")
 }
 
 fn sexpr(
   name: String,
-  args: List(StringBuilder),
-  indent: StringBuilder,
+  args: List(StringTree),
+  indent: StringTree,
   newline_separate: Bool,
-) -> StringBuilder {
+) -> StringTree {
   case newline_separate, args {
     _, [] -> {
       [sb("("), sb(name), sb(")")]
-      |> string_builder.concat
+      |> string_tree.concat
     }
     True, _ -> {
       let arg_list =
-        list.map(args, string_builder.prepend_builder(_, indent_more(indent)))
+        list.map(args, string_tree.prepend_tree(_, indent_more(indent)))
       [sb("("), sb(name), ..arg_list]
-      |> string_builder.concat
-      |> string_builder.append_builder(indent)
-      |> string_builder.append(")")
+      |> string_tree.concat
+      |> string_tree.append_tree(indent)
+      |> string_tree.append(")")
     }
     False, _ ->
-      [sb("("), string_builder.join([sb(name), ..args], " "), sb(")")]
-      |> string_builder.concat
+      [sb("("), string_tree.join([sb(name), ..args], " "), sb(")")]
+      |> string_tree.concat
   }
 }
 
-fn type_to_string(type_: WatType, indent: StringBuilder) -> StringBuilder {
+fn type_to_string(type_: WatType, indent: StringTree) -> StringTree {
   case type_ {
     Int32 -> sb("i32")
     Int64 -> sb("i64")
@@ -136,26 +136,22 @@ fn type_to_string(type_: WatType, indent: StringBuilder) -> StringBuilder {
         True,
       )
     Any -> sb("any")
-    _ -> {
-      io.debug(type_)
-      todo
-    }
   }
 }
 
-fn string_literal(value: String) -> StringBuilder {
+fn string_literal(value: String) -> StringTree {
   sb("\"" <> value <> "\"")
 }
 
-fn id_to_string(id: String) -> StringBuilder {
+fn id_to_string(id: String) -> StringTree {
   sb("$" <> id)
 }
 
 fn function_type_to_string(
   id: Option(String),
   definition: WatFunctionType,
-  indent: StringBuilder,
-) -> StringBuilder {
+  indent: StringTree,
+) -> StringTree {
   let params =
     list.map(definition.parameters, fn(param_type) {
       sexpr("param", [type_to_string(param_type, indent)], indent, False)
@@ -178,7 +174,7 @@ fn sexpr_taking_id_and_args(
   name: String,
   id: String,
   args: List(WatExpression),
-  indent: StringBuilder,
+  indent: StringTree,
 ) {
   sexpr(
     name,
@@ -191,10 +187,7 @@ fn sexpr_taking_id_and_args(
   )
 }
 
-fn expression_to_string(
-  expr: WatExpression,
-  indent: StringBuilder,
-) -> StringBuilder {
+fn expression_to_string(expr: WatExpression, indent: StringTree) -> StringTree {
   case expr {
     LocalGet(id) -> sexpr("local.get", [id_to_string(id)], indent, False)
     LocalSet(id, value) ->
@@ -294,7 +287,7 @@ fn expression_to_string(
   }
 }
 
-fn definition_to_string(definition: WatDefinition) -> StringBuilder {
+fn definition_to_string(definition: WatDefinition) -> StringTree {
   let indent = indent_more(sb("\n"))
   case definition {
     FunctionImport(module, name, id, type_) ->
@@ -373,5 +366,5 @@ fn definition_to_string(definition: WatDefinition) -> StringBuilder {
 
 pub fn to_string(module: WatModule) -> String {
   sexpr("module", list.map(module, definition_to_string), sb("\n"), True)
-  |> string_builder.to_string()
+  |> string_tree.to_string()
 }

@@ -70,9 +70,9 @@ fn list_modules(package_path: String) {
     simplifile.get_files(prefix)
     |> result.map_error(compiler.FileError),
   )
-  list.map(files, string.drop_left(_, string.length(prefix) + 1))
+  list.map(files, string.drop_start(_, string.length(prefix) + 1))
   |> list.filter(string.ends_with(_, suffix))
-  |> list.map(string.drop_right(_, string.length(suffix)))
+  |> list.map(string.drop_end(_, string.length(suffix)))
 }
 
 fn scan_package(source_path: String) {

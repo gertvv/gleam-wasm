@@ -1,10 +1,8 @@
-import compiler.{
-  type CompilerError, type ExpressionState, type GlobalState, type LocalState,
-}
+import compiler.{type CompilerError, type GlobalState}
 import expression_compiler
 import glance.{
-  type AssignmentName, type Definition, type Expression, type Function,
-  type FunctionParameter, type Module, type Statement, type Type,
+  type AssignmentName, type Definition, type Function, type FunctionParameter,
+  type Module, type Type,
 }
 import gleam/dict
 import gleam/io

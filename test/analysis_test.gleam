@@ -8,7 +8,6 @@ import gleam/pair
 import gleam/result
 import gleam/set
 import gleeunit/should
-import pprint
 import project
 
 fn empty_module_internals(package_name, module_path) {
@@ -1570,11 +1569,11 @@ pub fn fn_capture_test() {
 
   expr
   |> should.equal(
-    analysis.Fn(analysis.TypeVariable("$1"), [glance.Named("?")], [
+    analysis.Fn(analysis.TypeVariable("$1"), [glance.Named("$1")], [
       analysis.Expression(
         analysis.Call(analysis.Variable(analysis.TypeVariable("a"), "fun"), [
           analysis.Variable(analysis.int_type, "x"),
-          analysis.Variable(analysis.TypeVariable("$2"), "?"),
+          analysis.Variable(analysis.TypeVariable("$2"), "$1"),
           analysis.Variable(analysis.int_type, "y"),
         ]),
       ),

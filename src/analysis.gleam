@@ -15,12 +15,13 @@ import graph
 import pprint
 import project.{type ModuleId, type Project}
 
-// TODO: next steps?
+// TODO:
 // - constructors that have the same name as their type?
 // - unqualified imports
 // - identify which variables a closure captures from its environment
 // - constants
-// - complete inference for all expression types
+// - bit string support
+// - hole types
 
 fn try_map_fold(
   over list: List(a),
@@ -1626,20 +1627,22 @@ pub fn init_inference(
       )
     }
     glance.FnCapture(_label, function, args_before, args_after) -> {
-      // TODO: proper arg name
-      let arg_name = "?"
+      let #(context, arg_name) = fresh_generated_name(context)
       let #(context, arg_type) = fresh_type_variable(context)
       let #(context, return_type) = fresh_type_variable(context)
       init_inference(
         glance.Call(
           function,
           list.append(args_before, [
-            glance.Field(None, glance.Variable(arg_name)),
+            glance.Field(
+              None,
+              glance.Variable(assignment_name_to_string(arg_name)),
+            ),
             ..args_after
           ]),
         ),
         return_type,
-        dict.insert(environment, arg_name, arg_type),
+        dict.insert(environment, assignment_name_to_string(arg_name), arg_type),
         context,
       )
       |> result.map(fn(res) {
@@ -1647,7 +1650,7 @@ pub fn init_inference(
         let fn_type = FunctionType([arg_type], return_type)
         #(
           add_constraint(context, Equal(expected_type, fn_type)),
-          Fn(expected_type, [glance.Named(arg_name)], [Expression(expr)]),
+          Fn(expected_type, [arg_name], [Expression(expr)]),
         )
       })
     }
