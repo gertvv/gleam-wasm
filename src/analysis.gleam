@@ -147,7 +147,14 @@ pub fn list_type(item_type: Type) {
   TypeConstructor(BuiltInType(ListType), [item_type])
 }
 
-pub const gleam_module_id = project.SourceLocation("gleam", "gleam")
+pub fn tuple_type(element_types: List(Type)) {
+  TypeConstructor(
+    BuiltInType(TupleType(list.length(element_types))),
+    element_types,
+  )
+}
+
+pub const gleam_module_id = project.ModuleId("gleam", "gleam")
 
 pub type Field(t) {
   Field(label: Option(String), item: t)
@@ -2858,7 +2865,7 @@ pub fn main() {
   |> result.try(fn(project) {
     analyze_module(
       project,
-      project.SourceLocation(project.name, "example"),
+      project.ModuleId(project.name, "example"),
       dict.new(),
     )
   })

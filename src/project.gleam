@@ -32,7 +32,7 @@ pub type Package {
 }
 
 pub type ModuleId {
-  SourceLocation(package_name: String, module_path: String)
+  ModuleId(package_name: String, module_path: String)
 }
 
 pub fn shorthand(loc: ModuleId) -> String {
@@ -177,7 +177,7 @@ pub fn get_module_location(
   case dict.get(project.packages, package_name) {
     Ok(GleamPackage(modules: modules, ..)) ->
       case set.contains(modules, path) {
-        True -> Ok(SourceLocation(package_name, path))
+        True -> Ok(ModuleId(package_name, path))
         False -> Error(Nil)
       }
     _ -> Error(Nil)

@@ -15,7 +15,7 @@ fn empty_module_internals(package_name, module_path) {
     project.Project(package_name, "javascript", dict.new(), fn(_a, _b) {
       Error(compiler.ReferenceError("test"))
     })
-  let location = project.SourceLocation(package_name, module_path)
+  let location = project.ModuleId(package_name, module_path)
   analysis.ModuleInternals(
     project,
     location,
@@ -125,7 +125,7 @@ pub fn resolve_basic_types_test() {
   |> should.equal(Error(compiler.ReferenceError("MyFloat")))
 
   let generic_custom_type_id =
-    analysis.TypeFromModule(project.SourceLocation("foo", "bar"), "CustomType")
+    analysis.TypeFromModule(project.ModuleId("foo", "bar"), "CustomType")
   let generic_custom_type =
     analysis.GenericType(analysis.TypeVariable(""), parameters: ["b", "c"])
 
@@ -188,7 +188,7 @@ pub fn resolve_dependent_custom_types_test() {
     project.Project("test", "javascript", dict.new(), fn(_a, _b) {
       Error(compiler.ReferenceError("foo"))
     })
-  let location = project.SourceLocation("test", "bar")
+  let location = project.ModuleId("test", "bar")
 
   let assert Ok(internals) =
     analysis.resolve_types(
@@ -354,7 +354,7 @@ pub fn resolve_type_aliases_test() {
     project.Project("test", "javascript", dict.new(), fn(_a, _b) {
       Error(compiler.ReferenceError("foo"))
     })
-  let location = project.SourceLocation("test", "bar")
+  let location = project.ModuleId("test", "bar")
 
   analysis.resolve_types(
     project,
@@ -621,7 +621,7 @@ pub fn type_infer_function_using_import_test() {
 
   let module_int =
     analysis.Module(
-      project.SourceLocation("gleam_stdlib", "gleam/int"),
+      project.ModuleId("gleam_stdlib", "gleam/int"),
       dict.new(),
       dict.new(),
       dict.new(),
@@ -777,7 +777,7 @@ pub fn type_infer_function_with_return_annotation_test() {
     ),
   )
 
-  let option_module_id = project.SourceLocation("gleam_stdlib", "gleam/option")
+  let option_module_id = project.ModuleId("gleam_stdlib", "gleam/option")
   let option_type =
     analysis.TypeConstructor(
       analysis.TypeFromModule(option_module_id, "Option"),
@@ -935,7 +935,7 @@ pub fn type_infer_tuple_index_test() {
 }
 
 pub fn type_infer_nested_generics_test() {
-  let module_id = project.SourceLocation("foo", "bar")
+  let module_id = project.ModuleId("foo", "bar")
 
   let holder = fn(t) {
     analysis.TypeConstructor(analysis.TypeFromModule(module_id, "Holder"), [t])
@@ -1103,7 +1103,7 @@ pub fn type_infer_list_pattern_test() {
 }
 
 pub fn type_infer_constructor_pattern_test() {
-  let module_id = project.SourceLocation("foo", "bar")
+  let module_id = project.ModuleId("foo", "bar")
   let my_type_id = analysis.TypeFromModule(module_id, "MyType")
   let my_type =
     analysis.TypeConstructor(my_type_id, [analysis.TypeVariable("a")])
@@ -1207,7 +1207,7 @@ pub fn type_infer_constructor_pattern_test() {
 }
 
 pub fn type_infer_field_access_test() {
-  let module_id = project.SourceLocation("foo", "bar")
+  let module_id = project.ModuleId("foo", "bar")
   let my_type =
     analysis.TypeConstructor(analysis.TypeFromModule(module_id, "MyType"), [])
   let variant_a =
@@ -1703,7 +1703,7 @@ pub fn infer_use_test() {
                   #("b", analysis.list_type(var_a)),
                 ]),
               ),
-              project.SourceLocation("gleam_stdlib", "gleam/list"),
+              project.ModuleId("gleam_stdlib", "gleam/list"),
             ),
             [
               analysis.Variable(analysis.list_type(var_a), "lst"),
@@ -1789,7 +1789,7 @@ pub fn infer_function_test() {
       analysis.TypeVariable("b"),
     )
 
-  let module_id = project.SourceLocation("foo", "bar")
+  let module_id = project.ModuleId("foo", "bar")
 
   let sum_expected =
     Ok(analysis.Function(
@@ -1969,10 +1969,7 @@ pub fn no_arg_constructor_test() {
 pub fn result_test() {
   let result_type =
     analysis.TypeConstructor(
-      analysis.TypeFromModule(
-        project.SourceLocation("gleam", "gleam"),
-        "Result",
-      ),
+      analysis.TypeFromModule(project.ModuleId("gleam", "gleam"), "Result"),
       [analysis.TypeVariable("a"), analysis.TypeVariable("b")],
     )
   let result_custom_type =
@@ -2120,13 +2117,10 @@ pub fn nested_option_test() {
   |> should.equal(
     Ok(
       analysis.TypeConstructor(
-        analysis.TypeFromModule(project.SourceLocation("foo", "bar"), "Option"),
+        analysis.TypeFromModule(project.ModuleId("foo", "bar"), "Option"),
         [
           analysis.TypeConstructor(
-            analysis.TypeFromModule(
-              project.SourceLocation("foo", "bar"),
-              "Option",
-            ),
+            analysis.TypeFromModule(project.ModuleId("foo", "bar"), "Option"),
             [analysis.TypeVariable("a")],
           ),
         ],
