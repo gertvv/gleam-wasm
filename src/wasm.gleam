@@ -2,6 +2,7 @@ import gleam/bit_array
 import gleam/int
 import gleam/io
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleb128
 import simplifile
@@ -207,7 +208,7 @@ pub type Instruction {
   //
   // Parametric instructions
   Drop
-  // TODO: select
+  Select(List(ValueType))
   //
   // Variable instructions
   LocalGet(local_index: Int)
@@ -223,10 +224,22 @@ pub type Instruction {
   // TODO: memory instructions
   //
   // Numeric instructions
-  // TODO: I32, F32, F64
+  // TODO: should some of the *Const constructions take a BitArray?
   I32Const(value: Int)
   I64Const(value: Int)
-  // TODO: BitArray?
+  F32Const(value: Float)
+  F64Const(value: Float)
+  I32EqZ
+  I32Eq
+  I32NE
+  I32LtS
+  I32LtU
+  I32GtS
+  I32GtU
+  I32LeS
+  I32LeU
+  I32GeS
+  I32GeU
   I64EqZ
   I64Eq
   I64NE
@@ -238,6 +251,36 @@ pub type Instruction {
   I64LeU
   I64GeS
   I64GeU
+  F32Eq
+  F32NE
+  F32Lt
+  F32Gt
+  F32Le
+  F32Ge
+  F64Eq
+  F64NE
+  F64Lt
+  F64Gt
+  F64Le
+  F64Ge
+  I32CntLZ
+  I32CntTZ
+  I32PopCnt
+  I32Add
+  I32Sub
+  I32Mul
+  I32DivS
+  I32DivU
+  I32RemS
+  I32RemU
+  I32And
+  I32Or
+  I32Xor
+  I32ShL
+  I32ShRS
+  I32ShLU
+  I32RotL
+  I32RotR
   I64CntLZ
   I64CntTZ
   I64PopCnt
@@ -256,6 +299,34 @@ pub type Instruction {
   I64ShLU
   I64RotL
   I64RotR
+  F32Abs
+  F32Neg
+  F32Ceil
+  F32Floor
+  F32Trunc
+  F32Nearest
+  F32Sqrt
+  F32Add
+  F32Sub
+  F32Mul
+  F32Div
+  F32Min
+  F32Max
+  F32CopySign
+  F64Abs
+  F64Neg
+  F64Ceil
+  F64Floor
+  F64Trunc
+  F64Nearest
+  F64Sqrt
+  F64Add
+  F64Sub
+  F64Mul
+  F64Div
+  F64Min
+  F64Max
+  F64CopySign
   // TODO: conversions / truncations / etc.
   //
   // Vector instructions
@@ -471,10 +542,10 @@ pub fn add_instruction(
       check_stack_top(fb, break_to.result)
     }
     Return -> check_stack_top(fb, fb.result)
-    Call(function_index) -> todo
-    ReturnCall(function_index) -> todo
-    CallRef(type_index) -> todo
-    ReturnCallRef(type_index) -> todo
+    Call(_function_index) -> todo
+    ReturnCall(_function_index) -> todo
+    CallRef(_type_index) -> todo
+    ReturnCallRef(_type_index) -> todo
     End -> {
       case top_label {
         LabelIf(result: [], ..) -> Ok(fb)
@@ -490,6 +561,7 @@ pub fn add_instruction(
         False ->
           Ok(FunctionBuilder(..fb, value_stack: list.drop(fb.value_stack, 1)))
       }
+    Select(_maybe_types) -> todo
     RefNull(heap_type) -> pop_push(fb, [], [Ref(Nullable(heap_type))])
     RefFunc(function_index) ->
       get_function(fb, function_index)
@@ -513,8 +585,8 @@ pub fn add_instruction(
       pop_push(fb, [Ref(Nullable(AbstractAny)), Ref(Nullable(AbstractAny))], [
         I32,
       ])
-    RefTest(ref_type) -> todo
-    RefCast(ref_type) -> todo
+    RefTest(_ref_type) -> todo
+    RefCast(_ref_type) -> todo
     StructNew(type_index) -> {
       get_type(fb, type_index)
       |> result.try(unpack_struct_fields(_, type_index))
@@ -616,6 +688,19 @@ pub fn add_instruction(
       |> result.try(fn(t) { pop_push(fb, [t], []) })
     I32Const(_) -> pop_push(fb, [], [I32])
     I64Const(_) -> pop_push(fb, [], [I64])
+    F32Const(_) -> pop_push(fb, [], [F32])
+    F64Const(_) -> pop_push(fb, [], [F64])
+    I32EqZ -> pop_push(fb, [I32], [I32])
+    I32Eq
+    | I32NE
+    | I32LtS
+    | I32LtU
+    | I32GtS
+    | I32GtU
+    | I32LeS
+    | I32LeU
+    | I32GeS
+    | I32GeU -> pop_push(fb, [I32, I32], [I32])
     I64EqZ -> pop_push(fb, [I64], [I32])
     I64Eq
     | I64NE
@@ -627,6 +712,26 @@ pub fn add_instruction(
     | I64LeU
     | I64GeS
     | I64GeU -> pop_push(fb, [I64, I64], [I32])
+    F32Eq | F32NE | F32Lt | F32Gt | F32Le | F32Ge ->
+      pop_push(fb, [F32, F32], [I32])
+    F64Eq | F64NE | F64Lt | F64Gt | F64Le | F64Ge ->
+      pop_push(fb, [F64, F64], [I32])
+    I32CntLZ | I32CntTZ | I32PopCnt -> pop_push(fb, [I32], [I32])
+    I32Add
+    | I32Sub
+    | I32Mul
+    | I32DivS
+    | I32DivU
+    | I32RemS
+    | I32RemU
+    | I32And
+    | I32Or
+    | I32Xor
+    | I32ShL
+    | I32ShRS
+    | I32ShLU
+    | I32RotL
+    | I32RotR -> pop_push(fb, [I32, I32], [I32])
     I64CntLZ | I64CntTZ | I64PopCnt -> pop_push(fb, [I64], [I64])
     I64Add
     | I64Sub
@@ -643,6 +748,14 @@ pub fn add_instruction(
     | I64ShLU
     | I64RotL
     | I64RotR -> pop_push(fb, [I64, I64], [I64])
+    F32Abs | F32Neg | F32Ceil | F32Floor | F32Trunc | F32Nearest | F32Sqrt ->
+      pop_push(fb, [F32], [F32])
+    F32Add | F32Sub | F32Mul | F32Div | F32Min | F32Max | F32CopySign ->
+      pop_push(fb, [F32, F32], [F32])
+    F64Abs | F64Neg | F64Ceil | F64Floor | F64Trunc | F64Nearest | F64Sqrt ->
+      pop_push(fb, [F64], [F64])
+    F64Add | F64Sub | F64Mul | F64Div | F64Min | F64Max | F64CopySign ->
+      pop_push(fb, [F64, F64], [F64])
   }
   |> result.map(fn(fb) { FunctionBuilder(..fb, code: [instr, ..fb.code]) })
 }
@@ -1169,7 +1282,12 @@ fn encode_instruction(instr: Instruction) -> BitArray {
     //
     // Parametric instructions
     Drop -> code_instr_drop
-    // TODO: select
+    Select([]) -> code_instr_select
+    Select(types) ->
+      bit_array.concat([
+        code_instr_select_typed,
+        list.map(types, encode_value_type) |> encode_vector,
+      ])
     //
     // Variable instructions
     LocalGet(local_index) ->
@@ -1205,11 +1323,23 @@ fn encode_instruction(instr: Instruction) -> BitArray {
     // TODO: memory instructions
     //
     // Numeric instructions
-    // TODO: I32, F32, F64
     I32Const(value) ->
       bit_array.concat([code_instr_i32_const, gleb128.encode_signed(value)])
     I64Const(value) ->
       bit_array.concat([code_instr_i64_const, gleb128.encode_signed(value)])
+    F32Const(_value) -> todo
+    F64Const(_value) -> todo
+    I32EqZ -> code_instr_i32_eq_z
+    I32Eq -> code_instr_i32_eq
+    I32NE -> code_instr_i32_ne
+    I32LtS -> code_instr_i32_lt_s
+    I32LtU -> code_instr_i32_lt_u
+    I32GtS -> code_instr_i32_gt_s
+    I32GtU -> code_instr_i32_gt_u
+    I32LeS -> code_instr_i32_le_s
+    I32LeU -> code_instr_i32_le_u
+    I32GeS -> code_instr_i32_ge_s
+    I32GeU -> code_instr_i32_ge_u
     I64EqZ -> code_instr_i64_eq_z
     I64Eq -> code_instr_i64_eq
     I64NE -> code_instr_i64_ne
@@ -1221,6 +1351,36 @@ fn encode_instruction(instr: Instruction) -> BitArray {
     I64LeU -> code_instr_i64_le_u
     I64GeS -> code_instr_i64_ge_s
     I64GeU -> code_instr_i64_ge_u
+    F32Eq -> code_instr_f32_eq
+    F32NE -> code_instr_f32_ne
+    F32Lt -> code_instr_f32_lt
+    F32Gt -> code_instr_f32_gt
+    F32Le -> code_instr_f32_le
+    F32Ge -> code_instr_f32_ge
+    F64Eq -> code_instr_f64_eq
+    F64NE -> code_instr_f64_ne
+    F64Lt -> code_instr_f64_lt
+    F64Gt -> code_instr_f64_gt
+    F64Le -> code_instr_f64_le
+    F64Ge -> code_instr_f64_ge
+    I32CntLZ -> code_instr_i32_cnt_lz
+    I32CntTZ -> code_instr_i32_cnt_tz
+    I32PopCnt -> code_instr_i32_pop_cnt
+    I32Add -> code_instr_i32_add
+    I32Sub -> code_instr_i32_sub
+    I32Mul -> code_instr_i32_mul
+    I32DivS -> code_instr_i32_div_s
+    I32DivU -> code_instr_i32_div_u
+    I32RemS -> code_instr_i32_rem_s
+    I32RemU -> code_instr_i32_rem_u
+    I32And -> code_instr_i32_and
+    I32Or -> code_instr_i32_or
+    I32Xor -> code_instr_i32_xor
+    I32ShL -> code_instr_i32_sh_l
+    I32ShRS -> code_instr_i32_sh_r_s
+    I32ShLU -> code_instr_i32_sh_r_u
+    I32RotL -> code_instr_i32_rot_l
+    I32RotR -> code_instr_i32_rot_r
     I64CntLZ -> code_instr_i64_cnt_lz
     I64CntTZ -> code_instr_i64_cnt_tz
     I64PopCnt -> code_instr_i64_pop_cnt
@@ -1239,6 +1399,34 @@ fn encode_instruction(instr: Instruction) -> BitArray {
     I64ShLU -> code_instr_i64_sh_r_u
     I64RotL -> code_instr_i64_rot_l
     I64RotR -> code_instr_i64_rot_r
+    F32Abs -> code_instr_f32_abs
+    F32Neg -> code_instr_f32_neg
+    F32Ceil -> code_instr_f32_ceil
+    F32Floor -> code_instr_f32_floor
+    F32Trunc -> code_instr_f32_trunc
+    F32Nearest -> code_instr_f32_nearest
+    F32Sqrt -> code_instr_f32_sqrt
+    F32Add -> code_instr_f32_add
+    F32Sub -> code_instr_f32_sub
+    F32Mul -> code_instr_f32_mul
+    F32Div -> code_instr_f32_div
+    F32Min -> code_instr_f32_min
+    F32Max -> code_instr_f32_max
+    F32CopySign -> code_instr_f32_copy_sign
+    F64Abs -> code_instr_f64_abs
+    F64Neg -> code_instr_f64_neg
+    F64Ceil -> code_instr_f64_ceil
+    F64Floor -> code_instr_f64_floor
+    F64Trunc -> code_instr_f64_trunc
+    F64Nearest -> code_instr_f64_nearest
+    F64Sqrt -> code_instr_f64_sqrt
+    F64Add -> code_instr_f64_add
+    F64Sub -> code_instr_f64_sub
+    F64Mul -> code_instr_f64_mul
+    F64Div -> code_instr_f64_div
+    F64Min -> code_instr_f64_min
+    F64Max -> code_instr_f64_max
+    F64CopySign -> code_instr_f64_copy_sign
     // TODO: conversions / truncations / etc.
     //
     // Vector instructions
@@ -1391,6 +1579,28 @@ const code_instr_f32_const = <<0x43>>
 
 const code_instr_f64_const = <<0x44>>
 
+const code_instr_i32_eq_z = <<0x45>>
+
+const code_instr_i32_eq = <<0x46>>
+
+const code_instr_i32_ne = <<0x47>>
+
+const code_instr_i32_lt_s = <<0x48>>
+
+const code_instr_i32_lt_u = <<0x49>>
+
+const code_instr_i32_gt_s = <<0x4a>>
+
+const code_instr_i32_gt_u = <<0x4b>>
+
+const code_instr_i32_le_s = <<0x4c>>
+
+const code_instr_i32_le_u = <<0x4d>>
+
+const code_instr_i32_ge_s = <<0x4e>>
+
+const code_instr_i32_ge_u = <<0x4f>>
+
 const code_instr_i64_eq_z = <<0x50>>
 
 const code_instr_i64_eq = <<0x51>>
@@ -1412,6 +1622,66 @@ const code_instr_i64_le_u = <<0x58>>
 const code_instr_i64_ge_s = <<0x59>>
 
 const code_instr_i64_ge_u = <<0x5a>>
+
+const code_instr_f32_eq = <<0x5b>>
+
+const code_instr_f32_ne = <<0x5c>>
+
+const code_instr_f32_lt = <<0x5d>>
+
+const code_instr_f32_gt = <<0x5e>>
+
+const code_instr_f32_le = <<0x5f>>
+
+const code_instr_f32_ge = <<0x60>>
+
+const code_instr_f64_eq = <<0x61>>
+
+const code_instr_f64_ne = <<0x62>>
+
+const code_instr_f64_lt = <<0x63>>
+
+const code_instr_f64_gt = <<0x64>>
+
+const code_instr_f64_le = <<0x65>>
+
+const code_instr_f64_ge = <<0x66>>
+
+const code_instr_i32_cnt_lz = <<0x67>>
+
+const code_instr_i32_cnt_tz = <<0x68>>
+
+const code_instr_i32_pop_cnt = <<0x69>>
+
+const code_instr_i32_add = <<0x6a>>
+
+const code_instr_i32_sub = <<0x6b>>
+
+const code_instr_i32_mul = <<0x6c>>
+
+const code_instr_i32_div_s = <<0x6d>>
+
+const code_instr_i32_div_u = <<0x6e>>
+
+const code_instr_i32_rem_s = <<0x6f>>
+
+const code_instr_i32_rem_u = <<0x70>>
+
+const code_instr_i32_and = <<0x71>>
+
+const code_instr_i32_or = <<0x72>>
+
+const code_instr_i32_xor = <<0x73>>
+
+const code_instr_i32_sh_l = <<0x74>>
+
+const code_instr_i32_sh_r_s = <<0x75>>
+
+const code_instr_i32_sh_r_u = <<0x76>>
+
+const code_instr_i32_rot_l = <<0x77>>
+
+const code_instr_i32_rot_r = <<0x78>>
 
 const code_instr_i64_cnt_lz = <<0x79>>
 
@@ -1448,6 +1718,62 @@ const code_instr_i64_sh_r_u = <<0x87>>
 const code_instr_i64_rot_l = <<0x88>>
 
 const code_instr_i64_rot_r = <<0x8a>>
+
+const code_instr_f32_abs = <<0x8b>>
+
+const code_instr_f32_neg = <<0x8c>>
+
+const code_instr_f32_ceil = <<0x8d>>
+
+const code_instr_f32_floor = <<0x8e>>
+
+const code_instr_f32_trunc = <<0x8f>>
+
+const code_instr_f32_nearest = <<0x90>>
+
+const code_instr_f32_sqrt = <<0x91>>
+
+const code_instr_f32_add = <<0x92>>
+
+const code_instr_f32_sub = <<0x93>>
+
+const code_instr_f32_mul = <<0x94>>
+
+const code_instr_f32_div = <<0x95>>
+
+const code_instr_f32_min = <<0x96>>
+
+const code_instr_f32_max = <<0x97>>
+
+const code_instr_f32_copy_sign = <<0x98>>
+
+const code_instr_f64_abs = <<0x99>>
+
+const code_instr_f64_neg = <<0x9a>>
+
+const code_instr_f64_ceil = <<0x9b>>
+
+const code_instr_f64_floor = <<0x9c>>
+
+const code_instr_f64_trunc = <<0x9d>>
+
+const code_instr_f64_nearest = <<0x9e>>
+
+const code_instr_f64_sqrt = <<0x9f>>
+
+const code_instr_f64_add = <<0xa0>>
+
+const code_instr_f64_sub = <<0xa1>>
+
+const code_instr_f64_mul = <<0xa2>>
+
+const code_instr_f64_div = <<0xa3>>
+
+const code_instr_f64_min = <<0xa4>>
+
+const code_instr_f64_max = <<0xa5>>
+
+const code_instr_f64_copy_sign = <<0xa6>>
 
 const code_instr_ref_null = <<0xd0>>
 
