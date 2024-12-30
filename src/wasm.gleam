@@ -1,4 +1,5 @@
 import gleam/bit_array
+import gleam/int
 import gleam/io
 import gleam/list
 import gleam/result
@@ -38,7 +39,7 @@ fn impl() {
     ]),
   )
   use mb <- result.try(
-    add_type_group(mb, [Func([Ref(NonNull, ConcreteType(0))], [I64])]),
+    add_type_group(mb, [Func([Ref(NonNull(ConcreteType(0)))], [I64])]),
   )
   use #(mb, fb) <- result.try(create_function(mb, 1))
   use fb <- result.try(list.try_fold(
@@ -64,20 +65,24 @@ pub type ModuleBuilder {
     /// functions stored in reverse order
     functions: List(FunctionDefinition),
     next_function_index: Int,
-    // TODO: store function imports separately?
+    /// globals stored in reverse order
+    globals: List(ValueType),
+    next_global_index: Int,
   )
 }
 
 pub type FunctionBuilder {
   FunctionBuilder(
+    module_builder: ModuleBuilder,
     function_index: Int,
     type_index: Int,
     params: List(ValueType),
-    results: List(ValueType),
+    result: List(ValueType),
     locals: List(ValueType),
     next_local_index: Int,
     code: List(Instruction),
-    // TODO: some representation of the stack
+    value_stack: List(ValueType),
+    label_stack: List(Label),
   )
 }
 
@@ -102,13 +107,13 @@ pub type ValueType {
   F32
   F64
   V128
-  Ref(Nullability, HeapType)
+  Ref(RefType)
 }
 
-/// Indicates wheter a reference may be null
-pub type Nullability {
-  NonNull
-  Nullable
+/// Reference type
+pub type RefType {
+  NonNull(HeapType)
+  Nullable(HeapType)
 }
 
 /// Heap types classify the objects in the runtime store.
@@ -153,6 +158,15 @@ pub type PackedType {
   I16
 }
 
+/// Labels keep track of the scope (block/frame)
+pub type Label {
+  LabelFunc(stack_limit: Int, result: List(ValueType))
+  LabelBlock(stack_limit: Int, result: List(ValueType))
+  LabelLoop(stack_limit: Int, result: List(ValueType))
+  LabelIf(stack_limit: Int, result: List(ValueType))
+  LabelElse(stack_limit: Int, result: List(ValueType))
+}
+
 /// WebAssembly instructions (code)
 pub type Instruction {
   // Control instructions
@@ -176,16 +190,24 @@ pub type Instruction {
   End
   //
   // Reference instructions
-  // TODO: ref comparisons
+  RefNull(heap_type: HeapType)
+  RefFunc(function_index: Int)
+  RefIsNull
+  RefAsNonNull
+  RefEq
+  RefTest(ref_type: RefType)
+  RefCast(ref_type: RefType)
   StructNew(type_index: Int)
   StructNewDefault(type_index: Int)
   StructGet(type_index: Int, field_index: Int)
-  // TODO: struct.get_s / struct.get_u
+  StructGetS(type_index: Int, field_index: Int)
+  StructGetU(type_index: Int, field_index: Int)
   StructSet(type_index: Int, field_index: Int)
   // TODO: remaining reference instructions
   //
   // Parametric instructions
-  // TODO: drop, select
+  Drop
+  // TODO: select
   //
   // Variable instructions
   LocalGet(local_index: Int)
@@ -202,6 +224,7 @@ pub type Instruction {
   //
   // Numeric instructions
   // TODO: I32, F32, F64
+  I32Const(value: Int)
   I64Const(value: Int)
   // TODO: BitArray?
   I64EqZ
@@ -256,6 +279,8 @@ pub fn create_module_builder(output_file_path: String) -> ModuleBuilder {
     next_type_index: 0,
     functions: [],
     next_function_index: 0,
+    globals: [],
+    next_global_index: 0,
   )
 }
 
@@ -274,7 +299,7 @@ fn get_type_by_index_loop(type_groups, index) -> Result(CompositeType, String) {
     [] -> Error("Could not get type by index")
     [group, ..rest] -> {
       let length = list.length(group)
-      case length > index {
+      case length < index {
         True -> get_type_by_index_loop(rest, index - length)
         False ->
           list_index(group, index - 1)
@@ -306,59 +331,590 @@ pub fn add_type_group(
   )
 }
 
+fn get_type(fb: FunctionBuilder, type_index: Int) {
+  get_type_by_index(fb.module_builder, type_index)
+}
+
 pub fn create_function(
   mb: ModuleBuilder,
   type_index: Int,
 ) -> Result(#(ModuleBuilder, FunctionBuilder), String) {
   case get_type_by_index(mb, type_index) {
-    Ok(Func(params, results)) ->
-      Ok(#(
+    Ok(Func(params, result)) -> {
+      let module_builder =
         ModuleBuilder(
           ..mb,
           functions: [FunctionMissing(type_index)],
           next_function_index: mb.next_type_index + 1,
-        ),
+        )
+      Ok(#(
+        module_builder,
         FunctionBuilder(
-          mb.next_function_index,
-          type_index,
-          params,
-          results,
-          [],
-          list.length(params),
-          [],
+          module_builder:,
+          function_index: mb.next_function_index,
+          type_index:,
+          params:,
+          result:,
+          locals: [],
+          next_local_index: list.length(params),
+          code: [],
+          value_stack: [],
+          label_stack: [LabelFunc(0, result)],
         ),
       ))
+    }
     _ -> Error("No func type at this index")
   }
+}
+
+fn get_function(
+  fb: FunctionBuilder,
+  function_index: Int,
+) -> Result(FunctionDefinition, String) {
+  let mb = fb.module_builder
+  list_index(mb.functions, mb.next_function_index - function_index)
+  |> result.replace_error(
+    "Function index " <> int.to_string(function_index) <> " does not exist",
+  )
+}
+
+pub fn add_global(
+  mb: ModuleBuilder,
+  t: ValueType,
+) -> Result(#(ModuleBuilder, Int), String) {
+  Ok(#(
+    ModuleBuilder(
+      ..mb,
+      globals: [t, ..mb.globals],
+      next_global_index: mb.next_global_index + 1,
+    ),
+    mb.next_global_index,
+  ))
+}
+
+fn get_global(
+  fb: FunctionBuilder,
+  global_index: Int,
+) -> Result(ValueType, String) {
+  let mb = fb.module_builder
+  list_index(mb.globals, { mb.next_global_index - 1 } - global_index)
+  |> result.replace_error(
+    "Global index " <> int.to_string(global_index) <> " does not exist",
+  )
 }
 
 pub fn add_instruction(
   fb: FunctionBuilder,
   instr: Instruction,
 ) -> Result(FunctionBuilder, String) {
-  // TODO: validation
-  Ok(FunctionBuilder(..fb, code: [instr, ..fb.code]))
+  use #(top_label, bottom_labels) <- result.try(case fb.label_stack {
+    [] -> Error("Attempted to add instruction to ended function")
+    [head, ..tail] -> Ok(#(head, tail))
+  })
+  case instr {
+    Unreachable -> {
+      // unreachable clears the frame stack and produces the desired results
+      let value_stack =
+        list.drop(
+          fb.value_stack,
+          list.length(fb.value_stack) - top_label.stack_limit,
+        )
+        |> list.fold(over: top_label.result, from: _, with: list.prepend)
+      Ok(FunctionBuilder(..fb, value_stack:))
+    }
+    Nop -> Ok(fb)
+    Block(block_type) | Loop(block_type) | If(block_type) -> {
+      let result = case block_type {
+        BlockEmpty -> []
+        BlockValue(v) -> [v]
+      }
+      use #(fb, label_maker) <- result.map(case instr {
+        Block(_) -> Ok(#(fb, LabelBlock))
+        Loop(_) -> Ok(#(fb, LabelLoop))
+        _ -> pop_push(fb, [I32], []) |> result.map(fn(fb) { #(fb, LabelIf) })
+      })
+      FunctionBuilder(
+        ..fb,
+        label_stack: [
+          label_maker(list.length(fb.value_stack), result),
+          ..fb.label_stack
+        ],
+      )
+    }
+    Else -> {
+      use new_label <- result.try(case top_label {
+        LabelIf(stack_limit:, result:) -> Ok(LabelElse(stack_limit:, result:))
+        _ -> Error("Else must follow If")
+      })
+      check_stack_top_exact(fb, top_label.result)
+      |> result.map(fn(fb) {
+        FunctionBuilder(
+          ..fb,
+          value_stack: list.drop(fb.value_stack, list.length(top_label.result)),
+          label_stack: [new_label, ..bottom_labels],
+        )
+      })
+    }
+    Break(label_index) -> {
+      use break_to <- result.try(
+        list_index(fb.label_stack, label_index)
+        |> result.replace_error("Too few labels on the stack"),
+      )
+      pop_push(fb, break_to.result, [])
+    }
+    BreakIf(label_index) -> {
+      use break_to <- result.try(
+        list_index(fb.label_stack, label_index)
+        |> result.replace_error("Too few labels on the stack"),
+      )
+      use fb <- result.try(pop_push(fb, [I32], []))
+      check_stack_top(fb, break_to.result)
+    }
+    Return -> check_stack_top(fb, fb.result)
+    Call(function_index) -> todo
+    ReturnCall(function_index) -> todo
+    CallRef(type_index) -> todo
+    ReturnCallRef(type_index) -> todo
+    End -> {
+      case top_label {
+        LabelIf(result: [], ..) -> Ok(fb)
+        LabelIf(..) -> Error("Implicit else does not produce a result")
+        _ -> Ok(fb)
+      }
+      |> result.try(check_stack_top_exact(_, top_label.result))
+      |> result.map(fn(fb) { FunctionBuilder(..fb, label_stack: bottom_labels) })
+    }
+    Drop ->
+      case list.length(fb.value_stack) < top_label.stack_limit + 1 {
+        True -> Error("Too few values on the stack")
+        False ->
+          Ok(FunctionBuilder(..fb, value_stack: list.drop(fb.value_stack, 1)))
+      }
+    RefNull(heap_type) -> pop_push(fb, [], [Ref(Nullable(heap_type))])
+    RefFunc(function_index) ->
+      get_function(fb, function_index)
+      |> result.map(fn(fd) { ConcreteType(fd.type_index) })
+      |> result.try(fn(ht) { pop_push(fb, [], [Ref(NonNull(ht))]) })
+    RefIsNull -> pop_push(fb, [Ref(Nullable(AbstractAny))], [I32])
+    RefAsNonNull -> {
+      stack_top(fb)
+      |> result.try(fn(t) {
+        case t {
+          Ref(Nullable(ht)) -> pop_push(fb, [t], [Ref(NonNull(ht))])
+          _ ->
+            Error(
+              "Expected (ref null *) at depth 0 but got "
+              <> value_type_to_string(t),
+            )
+        }
+      })
+    }
+    RefEq ->
+      pop_push(fb, [Ref(Nullable(AbstractAny)), Ref(Nullable(AbstractAny))], [
+        I32,
+      ])
+    RefTest(ref_type) -> todo
+    RefCast(ref_type) -> todo
+    StructNew(type_index) -> {
+      get_type(fb, type_index)
+      |> result.try(unpack_struct_fields(_, type_index))
+      |> result.try(pop_push(fb, _, [Ref(NonNull(ConcreteType(type_index)))]))
+    }
+    StructNewDefault(type_index) -> {
+      get_type(fb, type_index)
+      |> result.try(unpack_struct_fields(_, type_index))
+      |> result.try(fn(fields) {
+        case list.all(fields, value_type_is_defaultable) {
+          True -> pop_push(fb, [], [Ref(NonNull(ConcreteType(type_index)))])
+          False ->
+            Error(
+              "Struct type $"
+              <> int.to_string(type_index)
+              <> " has non-defaultable fields",
+            )
+        }
+      })
+    }
+    StructGet(type_index, field_index)
+    | StructGetS(type_index, field_index)
+    | StructGetU(type_index, field_index) -> {
+      let packed = case instr {
+        StructGetS(_, _) -> True
+        StructGetU(_, _) -> True
+        _ -> False
+      }
+      get_type(fb, type_index)
+      |> result.try(fn(t) {
+        case t {
+          Struct(fields) ->
+            list_index(fields, field_index)
+            |> result.replace_error(
+              "Struct type $"
+              <> int.to_string(type_index)
+              <> " does not have field index "
+              <> int.to_string(field_index),
+            )
+            |> result.try(fn(field) {
+              case packed, field {
+                False, PackedType(_, _) ->
+                  Error("struct.get not applicable to packed fields")
+                False, ValueType(_, ht) -> Ok(ht)
+                True, PackedType(_, _) -> Ok(I32)
+                True, ValueType(_, _) ->
+                  Error("struct.get_[s|u] not applicable to value types")
+              }
+            })
+          _ ->
+            Error("Type $" <> int.to_string(type_index) <> " is not a struct")
+        }
+      })
+      |> result.try(fn(t) {
+        pop_push(fb, [Ref(NonNull(ConcreteType(type_index)))], [t])
+      })
+    }
+    StructSet(type_index, field_index) ->
+      get_type(fb, type_index)
+      |> result.try(fn(t) {
+        case t {
+          Struct(fields) ->
+            list_index(fields, field_index)
+            |> result.replace_error(
+              "Struct type $"
+              <> int.to_string(type_index)
+              <> " does not have field index "
+              <> int.to_string(field_index),
+            )
+            |> result.try(fn(field) {
+              case field {
+                PackedType(Immutable, _) | ValueType(Immutable, _) ->
+                  Error("struct.set on immutable field")
+                PackedType(Mutable, _) -> Ok(I32)
+                ValueType(Mutable, vt) -> Ok(vt)
+              }
+            })
+          _ ->
+            Error("Type $" <> int.to_string(type_index) <> " is not a struct")
+        }
+      })
+      |> result.try(fn(t) {
+        pop_push(fb, [t, Ref(NonNull(ConcreteType(type_index)))], [])
+      })
+    LocalGet(local_index) ->
+      get_local(fb, local_index)
+      |> result.try(fn(t) { pop_push(fb, [], [t]) })
+    LocalSet(local_index) ->
+      get_local(fb, local_index)
+      |> result.try(fn(t) { pop_push(fb, [t], []) })
+    LocalTee(local_index) ->
+      get_local(fb, local_index)
+      |> result.try(fn(t) { pop_push(fb, [t], [t]) })
+    GlobalGet(global_index) ->
+      get_global(fb, global_index)
+      |> result.try(fn(t) { pop_push(fb, [], [t]) })
+    GlobalSet(global_index) ->
+      get_global(fb, global_index)
+      |> result.try(fn(t) { pop_push(fb, [t], []) })
+    I32Const(_) -> pop_push(fb, [], [I32])
+    I64Const(_) -> pop_push(fb, [], [I64])
+    I64EqZ -> pop_push(fb, [I64], [I32])
+    I64Eq
+    | I64NE
+    | I64LtS
+    | I64LtU
+    | I64GtS
+    | I64GtU
+    | I64LeS
+    | I64LeU
+    | I64GeS
+    | I64GeU -> pop_push(fb, [I64, I64], [I32])
+    I64CntLZ | I64CntTZ | I64PopCnt -> pop_push(fb, [I64], [I64])
+    I64Add
+    | I64Sub
+    | I64Mul
+    | I64DivS
+    | I64DivU
+    | I64RemS
+    | I64RemU
+    | I64And
+    | I64Or
+    | I64Xor
+    | I64ShL
+    | I64ShRS
+    | I64ShLU
+    | I64RotL
+    | I64RotR -> pop_push(fb, [I64, I64], [I64])
+  }
+  |> result.map(fn(fb) { FunctionBuilder(..fb, code: [instr, ..fb.code]) })
 }
 
-pub fn add_local(fb: FunctionBuilder, t: ValueType) -> #(FunctionBuilder, Int) {
-  #(
+fn get_local(fb: FunctionBuilder, local_index: Int) -> Result(ValueType, String) {
+  let n_params = list.length(fb.params)
+  // params are considered locals too
+  case n_params > local_index {
+    True -> list_index(fb.params, local_index)
+    False -> {
+      // locals are indexed in reverse
+      let local_index =
+        { list.length(fb.locals) - 1 } - { local_index - n_params }
+      case local_index >= 0 {
+        True -> list_index(fb.locals, local_index)
+        False -> Error(Nil)
+      }
+    }
+  }
+  |> result.replace_error(
+    "Local index " <> int.to_string(local_index) <> " does not exist",
+  )
+}
+
+fn pop_push(fb: FunctionBuilder, pop, push) {
+  check_stack_top(fb, pop)
+  |> result.map(fn(fb) {
+    FunctionBuilder(
+      ..fb,
+      value_stack: list.append(
+        push,
+        list.drop(fb.value_stack, list.length(pop)),
+      ),
+    )
+  })
+}
+
+fn check_stack_top_exact(
+  fb: FunctionBuilder,
+  expected: List(ValueType),
+) -> Result(FunctionBuilder, String) {
+  use stack <- result.try(available_stack(fb))
+  case list.length(stack) > list.length(expected) {
+    True -> Error("Too many values on the stack")
+    False -> check_stack_top_loop(fb, stack, expected, 0)
+  }
+  |> result.replace(fb)
+}
+
+fn check_stack_top(
+  fb: FunctionBuilder,
+  expected: List(ValueType),
+) -> Result(FunctionBuilder, String) {
+  use stack <- result.try(available_stack(fb))
+  check_stack_top_loop(fb, stack, expected, 0)
+  |> result.replace(fb)
+}
+
+fn check_stack_top_loop(
+  fb: FunctionBuilder,
+  stack: List(ValueType),
+  expected: List(ValueType),
+  depth: Int,
+) -> Result(Nil, String) {
+  case expected, stack {
+    [exp, ..exp_rest], [act, ..act_rest] -> {
+      case value_type_subtype_of(fb, is: act, of: exp) {
+        True -> check_stack_top_loop(fb, act_rest, exp_rest, depth + 1)
+        False ->
+          Error(
+            "Expected "
+            <> value_type_to_string(exp)
+            <> " at depth "
+            <> int.to_string(depth)
+            <> " but got "
+            <> value_type_to_string(act),
+          )
+      }
+    }
+    [_exp, ..], [] -> Error("Too few values on the stack")
+    [], _ -> Ok(Nil)
+  }
+}
+
+fn value_type_subtype_of(
+  fb: FunctionBuilder,
+  is sub: ValueType,
+  of sup: ValueType,
+) -> Bool {
+  case sub, sup {
+    Ref(NonNull(sub_ht)), Ref(Nullable(sup_ht))
+    | Ref(NonNull(sub_ht)), Ref(NonNull(sup_ht))
+    | Ref(Nullable(sub_ht)), Ref(Nullable(sup_ht))
+    -> heap_type_subtype_of(fb, sub_ht, sup_ht)
+    Ref(Nullable(_)), Ref(NonNull(_)) -> False
+    _, _ -> sub == sup
+  }
+}
+
+fn heap_type_subtype_of(
+  fb: FunctionBuilder,
+  is sub: HeapType,
+  of sup: HeapType,
+) -> Bool {
+  // TODO: hierarchies of concrete typyes
+  case sub, sup {
+    _, _ if sub == sup -> True
+    _, AbstractAny -> True
+    ConcreteType(i), AbstractArray ->
+      get_type(fb, i)
+      |> result.map(is_array)
+      |> result.unwrap(False)
+    ConcreteType(i), AbstractEq ->
+      get_type(fb, i)
+      |> result.replace(True)
+      |> result.unwrap(False)
+    AbstractArray, AbstractEq
+    | AbstractFunc, AbstractEq
+    | AbstractI31, AbstractEq
+    | AbstractStruct, AbstractEq
+    | AbstractNone, AbstractEq
+    -> True
+    ConcreteType(i), AbstractFunc ->
+      get_type(fb, i)
+      |> result.map(is_func)
+      |> result.unwrap(False)
+    ConcreteType(i), AbstractStruct ->
+      get_type(fb, i)
+      |> result.map(is_struct)
+      |> result.unwrap(False)
+    AbstractNoExtern, AbstractExtern -> True
+    AbstractNoFunc, AbstractFunc -> True
+    AbstractNoFunc, ConcreteType(i) ->
+      get_type(fb, i)
+      |> result.map(is_func)
+      |> result.unwrap(False)
+    AbstractNone, AbstractArray
+    | AbstractNone, AbstractFunc
+    | AbstractNone, AbstractStruct
+    -> True
+    AbstractNone, ConcreteType(i) ->
+      get_type(fb, i)
+      |> result.replace(True)
+      |> result.unwrap(False)
+    _, _ -> False
+  }
+}
+
+fn is_array(t: CompositeType) -> Bool {
+  case t {
+    Array(_) -> True
+    _ -> False
+  }
+}
+
+fn is_struct(t: CompositeType) -> Bool {
+  case t {
+    Struct(_) -> True
+    _ -> False
+  }
+}
+
+fn is_func(t: CompositeType) -> Bool {
+  case t {
+    Func(_, _) -> True
+    _ -> False
+  }
+}
+
+fn stack_top(fb: FunctionBuilder) -> Result(ValueType, String) {
+  use stack <- result.try(available_stack(fb))
+  case stack {
+    [] -> Error("Too few values on the stack")
+    [t, ..] -> Ok(t)
+  }
+}
+
+fn top_label(fb: FunctionBuilder) -> Result(Label, String) {
+  case fb.label_stack {
+    [top_label, ..] -> Ok(top_label)
+    [] -> Error("Label stack is empty")
+  }
+}
+
+fn available_stack(fb: FunctionBuilder) -> Result(List(ValueType), String) {
+  use top_label <- result.map(top_label(fb))
+  list.take(fb.value_stack, list.length(fb.value_stack) - top_label.stack_limit)
+}
+
+fn unpack_struct_fields(
+  ct: CompositeType,
+  type_index: Int,
+) -> Result(List(ValueType), String) {
+  case ct {
+    Struct(fields) -> Ok(list.map(fields, unpack_packed_field) |> list.reverse)
+    _ -> Error("Type $" <> int.to_string(type_index) <> " is not a struct")
+  }
+}
+
+fn unpack_packed_field(ft: FieldType) -> ValueType {
+  case ft {
+    PackedType(_, _) -> I32
+    ValueType(_, t) -> t
+  }
+}
+
+fn value_type_is_defaultable(vt: ValueType) -> Bool {
+  case vt {
+    F32 -> True
+    F64 -> True
+    I32 -> True
+    I64 -> True
+    Ref(Nullable(_)) -> True
+    Ref(NonNull(_)) -> False
+    V128 -> True
+  }
+}
+
+fn value_type_to_string(t: ValueType) {
+  case t {
+    I32 -> "i32"
+    I64 -> "i64"
+    F32 -> "f32"
+    F64 -> "f64"
+    V128 -> "v128"
+    Ref(Nullable(ht)) -> "(ref null " <> heap_type_to_string(ht) <> ")"
+    Ref(NonNull(ht)) -> "(ref " <> heap_type_to_string(ht) <> ")"
+  }
+}
+
+fn heap_type_to_string(t: HeapType) {
+  case t {
+    AbstractAny -> "any"
+    AbstractArray -> "array"
+    AbstractEq -> "eq"
+    AbstractExtern -> "extern"
+    AbstractFunc -> "func"
+    AbstractI31 -> "i32"
+    AbstractNoExtern -> "noextern"
+    AbstractNoFunc -> "nofunc"
+    AbstractNone -> "none"
+    AbstractStruct -> "struct"
+    ConcreteType(idx) -> "$" <> int.to_string(idx)
+  }
+}
+
+pub fn add_local(
+  fb: FunctionBuilder,
+  t: ValueType,
+) -> Result(#(FunctionBuilder, Int), String) {
+  Ok(#(
     FunctionBuilder(
       ..fb,
       locals: [t, ..fb.locals],
       next_local_index: fb.next_local_index + 1,
     ),
     fb.next_local_index,
-  )
+  ))
 }
 
 pub fn finalize_function(
   fb: FunctionBuilder,
 ) -> Result(FunctionDefinition, String) {
-  Ok(FunctionImplementation(
-    fb.type_index,
-    list.reverse(fb.locals),
-    list.reverse(fb.code),
-  ))
+  case fb.label_stack {
+    [] ->
+      Ok(FunctionImplementation(
+        fb.type_index,
+        list.reverse(fb.locals),
+        list.reverse(fb.code),
+      ))
+    _ -> Error("Function incomplete")
+  }
 }
 
 // --------------------------------------------------------------------------- 
@@ -435,14 +991,10 @@ fn encode_value_type(t: ValueType) -> BitArray {
     F64 -> code_type_i64
     I32 -> code_type_f32
     I64 -> code_type_f64
-    Ref(null, heap_type) ->
-      bit_array.append(
-        case null {
-          NonNull -> code_ref_non_null
-          Nullable -> code_ref_nullable
-        },
-        encode_heap_type(heap_type),
-      )
+    Ref(NonNull(heap_type)) ->
+      bit_array.append(code_ref_non_null, encode_heap_type(heap_type))
+    Ref(Nullable(heap_type)) ->
+      bit_array.append(code_ref_nullable, encode_heap_type(heap_type))
     V128 -> code_type_v128
   }
 }
@@ -548,7 +1100,36 @@ fn encode_instruction(instr: Instruction) -> BitArray {
     End -> code_instr_end
     //
     // Reference instructions
-    // TODO: ref comparisons
+    RefNull(heap_type) ->
+      bit_array.concat([code_instr_ref_null, encode_heap_type(heap_type)])
+    RefFunc(function_index) ->
+      bit_array.concat([
+        code_instr_ref_func,
+        leb128_encode_unsigned(function_index),
+      ])
+    RefIsNull -> code_instr_ref_is_null
+    RefAsNonNull -> code_instr_ref_as_non_null
+    RefEq -> code_instr_ref_eq
+    RefTest(NonNull(heap_type)) ->
+      bit_array.concat([
+        code_instr_ref_test_nonnull,
+        encode_heap_type(heap_type),
+      ])
+    RefTest(Nullable(heap_type)) ->
+      bit_array.concat([
+        code_instr_ref_test_nullable,
+        encode_heap_type(heap_type),
+      ])
+    RefCast(NonNull(heap_type)) ->
+      bit_array.concat([
+        code_instr_ref_cast_nonnull,
+        encode_heap_type(heap_type),
+      ])
+    RefCast(Nullable(heap_type)) ->
+      bit_array.concat([
+        code_instr_ref_cast_nullable,
+        encode_heap_type(heap_type),
+      ])
     StructNew(type_index) ->
       bit_array.concat([
         code_instr_struct_new,
@@ -565,6 +1146,18 @@ fn encode_instruction(instr: Instruction) -> BitArray {
         leb128_encode_unsigned(type_index),
         leb128_encode_unsigned(field_index),
       ])
+    StructGetS(type_index, field_index) ->
+      bit_array.concat([
+        code_instr_struct_get_s,
+        leb128_encode_unsigned(type_index),
+        leb128_encode_unsigned(field_index),
+      ])
+    StructGetU(type_index, field_index) ->
+      bit_array.concat([
+        code_instr_struct_get_u,
+        leb128_encode_unsigned(type_index),
+        leb128_encode_unsigned(field_index),
+      ])
     // TODO: struct.get_s / struct.get_u
     StructSet(type_index, field_index) ->
       bit_array.concat([
@@ -575,7 +1168,8 @@ fn encode_instruction(instr: Instruction) -> BitArray {
     // TODO: remaining reference instructions
     //
     // Parametric instructions
-    // TODO: drop, select
+    Drop -> code_instr_drop
+    // TODO: select
     //
     // Variable instructions
     LocalGet(local_index) ->
@@ -612,6 +1206,8 @@ fn encode_instruction(instr: Instruction) -> BitArray {
     //
     // Numeric instructions
     // TODO: I32, F32, F64
+    I32Const(value) ->
+      bit_array.concat([code_instr_i32_const, gleb128.encode_signed(value)])
     I64Const(value) ->
       bit_array.concat([code_instr_i64_const, gleb128.encode_signed(value)])
     I64EqZ -> code_instr_i64_eq_z
@@ -771,6 +1367,12 @@ const code_instr_call_ref = <<0x14>>
 
 const code_instr_return_call_ref = <<0x15>>
 
+const code_instr_drop = <<0x1a>>
+
+const code_instr_select = <<0x1b>>
+
+const code_instr_select_typed = <<0x1c>>
+
 const code_instr_local_get = <<0x20>>
 
 const code_instr_local_set = <<0x21>>
@@ -847,10 +1449,32 @@ const code_instr_i64_rot_l = <<0x88>>
 
 const code_instr_i64_rot_r = <<0x8a>>
 
+const code_instr_ref_null = <<0xd0>>
+
+const code_instr_ref_is_null = <<0xd1>>
+
+const code_instr_ref_func = <<0xd2>>
+
+const code_instr_ref_eq = <<0xd3>>
+
+const code_instr_ref_as_non_null = <<0xd4>>
+
 const code_instr_struct_new = <<0xfb, 0x00>>
 
 const code_instr_struct_new_default = <<0xfb, 0x01>>
 
 const code_instr_struct_get = <<0xfb, 0x02>>
 
+const code_instr_struct_get_s = <<0xfb, 0x03>>
+
+const code_instr_struct_get_u = <<0xfb, 0x04>>
+
 const code_instr_struct_set = <<0xfb, 0x05>>
+
+const code_instr_ref_test_nonnull = <<0xfb, 0x14>>
+
+const code_instr_ref_test_nullable = <<0xfb, 0x15>>
+
+const code_instr_ref_cast_nonnull = <<0xfb, 0x16>>
+
+const code_instr_ref_cast_nullable = <<0xfb, 0x17>>
