@@ -1,31 +1,22 @@
+//// Generate binary WebAssembly modules in pure Gleam.
+////
+//// WebAssembly types and instructions are represented by Gleam types and
+//// validation is performed as the WebAssembly is generated.
+////
+//// ## Example
+//// ```
+//// let mb = create_module_builder("out.wasm")
+//// ...
+//// ```
+//// Runs a simple example. To be removed.
+
 import gleam/bit_array
 import gleam/int
 import gleam/io
 import gleam/list
-import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleb128
 import simplifile
-
-// API sketch:
-// create_module(fname) -> module
-// register_type(module, type) -> type_idx
-// create_function(module, type_idx) -> FunctionBuilder w/ function_idx
-// add_instruction(function, instruction) -> FunctionBuilder
-// register_function(function, module) -> module
-// import_function??
-// emit_module
-//gert@archer:~/repos/gleam-wasm$ hexdump -C simple.wasm 
-// 00 61 73 6d 01 00 00 00 ; header + version
-// 01 0d 02                ; type section, length 12, 2 elements
-// 5f 02 7e 00 7e 00       ; struct, 2 fields, i64 imm, i64 imm
-// 60 01 64 00 01 7e       ; func, 1 param, NonNullable $0, 1 result, i64
-// 03 02 01 01             ; func section, lenght 2, 1 func, type $1
-// 0a 0a 01                ; code section, length 10, 1 func
-// 08 00                   ; code size 8, 0 locals
-// 20 00                   ; local get $0
-// fb 02 00 00             ; struct.get $0 $0
-// 0b                      ; func end
 
 pub fn main() {
   impl() |> io.debug
@@ -42,14 +33,13 @@ fn impl() {
   use mb <- result.try(
     add_type_group(mb, [Func([Ref(NonNull(ConcreteType(0)))], [I64])]),
   )
-  use #(mb, fb) <- result.try(create_function(mb, 1))
+  use #(mb, fb) <- result.try(create_function_builder(mb, 1))
   use fb <- result.try(list.try_fold(
     over: [LocalGet(0), StructGet(0, 0), End],
     from: fb,
     with: add_instruction,
   ))
-  use fd <- result.try(finalize_function(fb))
-  let mb = ModuleBuilder(..mb, functions: [fd, ..list.drop(mb.functions, 1)])
+  use mb <- result.try(finalize_function(mb, fb))
   emit_module(mb) |> result.replace_error("Error writing to file")
 }
 
@@ -153,7 +143,7 @@ pub type Mutability {
   Immutable
 }
 
-/// Packed types can not exist as standalone values but can be fields
+/// Packed types cannot exist as standalone values but can be fields
 pub type PackedType {
   I8
   I16
@@ -343,6 +333,10 @@ pub type BlockType {
 // WebAssembly module & code builders
 // --------------------------------------------------------------------------- 
 
+/// Creates a ModuleBuilder that outputs to a specific file path.
+///
+/// In a future version, the file path will likely be replaced by an output
+/// stream abstraction.
 pub fn create_module_builder(output_file_path: String) -> ModuleBuilder {
   ModuleBuilder(
     output_file_path:,
@@ -388,6 +382,20 @@ fn list_index(lst: List(a), idx: Int) -> Result(a, Nil) {
   }
 }
 
+fn list_replace(lst: List(a), idx: Int, val: a) -> Result(List(a), Nil) {
+  // TODO: tail recursive
+  case lst, idx {
+    [_head, ..tail], 0 -> Ok([val, ..tail])
+    [head, ..tail], n if n > 0 ->
+      list_replace(tail, n - 1, val)
+      |> result.map(fn(new_tail) { [head, ..new_tail] })
+    _, _ -> Error(Nil)
+  }
+}
+
+/// Adds a type recursion group to the module.
+///
+/// Can be done any time before creating a function that uses it.
 pub fn add_type_group(
   mb: ModuleBuilder,
   group: List(CompositeType),
@@ -406,7 +414,12 @@ fn get_type(fb: FunctionBuilder, type_index: Int) {
   get_type_by_index(fb.module_builder, type_index)
 }
 
-pub fn create_function(
+/// Register a function placeholder with the `ModuleBuilder` and create a
+/// FunctionBuilder for it.
+///
+/// Multiple function implementations can be generated in parallel, to be
+/// finalized into the `ModuleBuilder` when ready.
+pub fn create_function_builder(
   mb: ModuleBuilder,
   type_index: Int,
 ) -> Result(#(ModuleBuilder, FunctionBuilder), String) {
@@ -449,6 +462,9 @@ fn get_function(
   )
 }
 
+/// Add a global to the `ModuleBuilder`.
+///
+/// Can be done any time before creating a function that uses it.
 pub fn add_global(
   mb: ModuleBuilder,
   t: ValueType,
@@ -474,6 +490,9 @@ fn get_global(
   )
 }
 
+/// Add an instruction to the `FunctionBuilder`.
+///
+/// Validates the stack contains the value types the instruction requires.
 pub fn add_instruction(
   fb: FunctionBuilder,
   instr: Instruction,
@@ -1002,6 +1021,9 @@ fn heap_type_to_string(t: HeapType) {
   }
 }
 
+/// Add a local to the `FunctionBuilder`.
+///
+/// Can be done any time before the local is used.
 pub fn add_local(
   fb: FunctionBuilder,
   t: ValueType,
@@ -1016,16 +1038,27 @@ pub fn add_local(
   ))
 }
 
+/// Complete the `FunctionBuilder` and replace the corresponding placeholder in
+/// `ModuleBuilder` by the validated function code.
 pub fn finalize_function(
+  mb: ModuleBuilder,
   fb: FunctionBuilder,
-) -> Result(FunctionDefinition, String) {
+) -> Result(ModuleBuilder, String) {
   case fb.label_stack {
     [] ->
-      Ok(FunctionImplementation(
-        fb.type_index,
-        list.reverse(fb.locals),
-        list.reverse(fb.code),
-      ))
+      list_replace(
+        mb.functions,
+        fb.function_index,
+        FunctionImplementation(
+          fb.type_index,
+          list.reverse(fb.locals),
+          list.reverse(fb.code),
+        ),
+      )
+      |> result.replace_error(
+        "No function at index " <> int.to_string(fb.function_index),
+      )
+      |> result.map(fn(functions) { ModuleBuilder(..mb, functions:) })
     _ -> Error("Function incomplete")
   }
 }
@@ -1034,7 +1067,9 @@ pub fn finalize_function(
 // WebAssembly binary encoding
 // --------------------------------------------------------------------------- 
 
-// TODO: abstract away simplifile
+/// Convert the WebAssembly to binary and output to file.
+///
+/// Assumes the WebAssembly module is valid.
 pub fn emit_module(mb: ModuleBuilder) -> Result(Nil, simplifile.FileError) {
   let header = <<0x00, 0x61, 0x73, 0x6d>>
   let version = <<0x01, 0x00, 0x00, 0x00>>

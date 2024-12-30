@@ -6,20 +6,27 @@ import wasm
 fn simple_func(params, result, code) {
   let mb = wasm.create_module_builder("foo.wasm")
   use mb <- result.try(wasm.add_type_group(mb, [wasm.Func(params, result)]))
-  use #(_, fb) <- result.try(wasm.create_function(mb, 0))
+  use #(_, fb) <- result.try(wasm.create_function_builder(mb, 0))
   list.try_fold(code, fb, wasm.add_instruction)
+}
+
+fn simple_finalize(fb: wasm.FunctionBuilder) {
+  wasm.finalize_function(fb.module_builder, fb)
+  |> result.try(fn(mb) {
+    list.first(mb.functions) |> result.replace_error("No functions")
+  })
 }
 
 fn prepared_func(mb: wasm.ModuleBuilder, params, result, code) {
   let tidx = mb.next_type_index
   use mb <- result.try(wasm.add_type_group(mb, [wasm.Func(params, result)]))
-  use #(_, fb) <- result.try(wasm.create_function(mb, tidx))
+  use #(_, fb) <- result.try(wasm.create_function_builder(mb, tidx))
   list.try_fold(code, fb, wasm.add_instruction)
 }
 
 pub fn return_const_test() {
   simple_func([], [wasm.I64], [wasm.I64Const(42), wasm.End])
-  |> result.try(wasm.finalize_function)
+  |> result.try(simple_finalize)
   |> should.equal(
     Ok(wasm.FunctionImplementation(0, [], [wasm.I64Const(42), wasm.End])),
   )
@@ -27,13 +34,13 @@ pub fn return_const_test() {
 
 pub fn finalize_incomplete_function_test() {
   simple_func([], [wasm.I64], [wasm.I64Const(42)])
-  |> result.try(wasm.finalize_function)
+  |> result.try(simple_finalize)
   |> should.equal(Error("Function incomplete"))
 }
 
 pub fn missing_return_value_test() {
   simple_func([], [wasm.I64], [wasm.End])
-  |> result.try(wasm.finalize_function)
+  |> result.try(simple_finalize)
   |> should.equal(Error("Too few values on the stack"))
 }
 
@@ -44,20 +51,20 @@ pub fn incorrect_return_value_test() {
 
 pub fn too_many_return_values_test() {
   simple_func([], [wasm.I64], [wasm.I64Const(42), wasm.I64Const(42), wasm.End])
-  |> result.try(wasm.finalize_function)
+  |> result.try(simple_finalize)
   |> should.equal(Error("Too many values on the stack"))
 }
 
 pub fn i64_add_test() {
   let code = [wasm.I64Const(41), wasm.I64Const(1), wasm.I64Add, wasm.End]
   simple_func([], [wasm.I64], code)
-  |> result.try(wasm.finalize_function)
+  |> result.try(simple_finalize)
   |> should.equal(Ok(wasm.FunctionImplementation(0, [], code)))
 }
 
 pub fn i64_add_missing_arg_test() {
   simple_func([], [wasm.I64], [wasm.I64Const(1), wasm.I64Add, wasm.End])
-  |> result.try(wasm.finalize_function)
+  |> result.try(simple_finalize)
   |> should.equal(Error("Too few values on the stack"))
 }
 
@@ -68,14 +75,14 @@ pub fn i64_add_incorrect_arg_test() {
     wasm.I64Add,
     wasm.End,
   ])
-  |> result.try(wasm.finalize_function)
+  |> result.try(simple_finalize)
   |> should.equal(Error("Expected i64 at depth 1 but got i32"))
 }
 
 pub fn block_empty_test() {
   let code = [wasm.Block(wasm.BlockEmpty), wasm.End, wasm.End]
   simple_func([], [], code)
-  |> result.try(wasm.finalize_function)
+  |> result.try(simple_finalize)
   |> should.equal(Ok(wasm.FunctionImplementation(0, [], code)))
 }
 
@@ -96,7 +103,7 @@ pub fn block_result_test() {
     wasm.End,
   ]
   simple_func([], [wasm.I64], code)
-  |> result.try(wasm.finalize_function)
+  |> result.try(simple_finalize)
   |> should.equal(Ok(wasm.FunctionImplementation(0, [], code)))
 }
 
@@ -107,7 +114,7 @@ pub fn block_missing_result_test() {
 
 pub fn local_get_test() {
   simple_func([wasm.I64], [wasm.I64], [wasm.LocalGet(0), wasm.End])
-  |> result.try(wasm.finalize_function)
+  |> result.try(simple_finalize)
   |> should.equal(
     Ok(wasm.FunctionImplementation(0, [], [wasm.LocalGet(0), wasm.End])),
   )
@@ -115,19 +122,19 @@ pub fn local_get_test() {
 
 pub fn local_get_oob_test() {
   simple_func([wasm.I64], [wasm.I64], [wasm.LocalGet(1)])
-  |> result.try(wasm.finalize_function)
+  |> result.try(simple_finalize)
   |> should.equal(Error("Local index 1 does not exist"))
 }
 
 pub fn local_get_incorrect_type_test() {
   simple_func([wasm.I32], [wasm.I64], [wasm.LocalGet(0), wasm.End])
-  |> result.try(wasm.finalize_function)
+  |> result.try(simple_finalize)
   |> should.equal(Error("Expected i64 at depth 0 but got i32"))
 }
 
 pub fn local_set_test() {
   simple_func([wasm.I64], [], [wasm.I64Const(42), wasm.LocalSet(0), wasm.End])
-  |> result.try(wasm.finalize_function)
+  |> result.try(simple_finalize)
   |> should.be_ok
 }
 
@@ -143,7 +150,7 @@ pub fn break_test() {
     wasm.End,
   ]
   simple_func([], [wasm.I64], code)
-  |> result.try(wasm.finalize_function)
+  |> result.try(simple_finalize)
   |> should.equal(Ok(wasm.FunctionImplementation(0, [], code)))
 }
 
@@ -161,7 +168,7 @@ pub fn break_if_test() {
     wasm.End,
   ]
   simple_func([wasm.I32], [wasm.I64], code)
-  |> result.try(wasm.finalize_function)
+  |> result.try(simple_finalize)
   |> should.equal(Ok(wasm.FunctionImplementation(0, [], code)))
 }
 
@@ -186,7 +193,7 @@ pub fn if_else_test() {
     wasm.End,
   ]
   simple_func([wasm.I32], [wasm.I64], code)
-  |> result.try(wasm.finalize_function)
+  |> result.try(simple_finalize)
   |> should.be_ok
 }
 
@@ -248,7 +255,7 @@ pub fn return_null_struct_ref_test() {
     wasm.RefNull(wasm.ConcreteType(0)),
     wasm.End,
   ])
-  |> result.try(wasm.finalize_function)
+  |> result.try(simple_finalize)
   |> should.be_ok
 }
 
@@ -363,7 +370,7 @@ pub fn struct_get_test() {
     wasm.StructGet(0, 0),
     wasm.End,
   ])
-  |> result.try(wasm.finalize_function)
+  |> result.try(simple_finalize)
   |> should.be_ok
 }
 
@@ -380,6 +387,6 @@ pub fn struct_set_test() {
     wasm.StructSet(0, 0),
     wasm.End,
   ])
-  |> result.try(wasm.finalize_function)
+  |> result.try(simple_finalize)
   |> should.be_ok
 }
