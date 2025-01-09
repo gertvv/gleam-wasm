@@ -17,7 +17,7 @@ pub type ErrorLocation {
 }
 
 pub type CompilerError {
-  FileError(error: FileError)
+  FileError(path: String, error: FileError)
   PackageTomlError(error: gloml.DecodeError)
   CircularDependencyError
   ParseError(error: glance.Error)

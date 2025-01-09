@@ -44,6 +44,8 @@ pub type BuiltInType {
   IntType
   FloatType
   BoolType
+  UtfCodepointType
+  BitArrayType
   StringType
   ListType
   TupleType(Int)
@@ -141,6 +143,13 @@ pub const float_type = TypeConstructor(BuiltInType(FloatType), [])
 
 pub const bool_type = TypeConstructor(BuiltInType(BoolType), [])
 
+pub const utf_codepoint_type = TypeConstructor(
+  BuiltInType(UtfCodepointType),
+  [],
+)
+
+pub const bit_array_type = TypeConstructor(BuiltInType(BitArrayType), [])
+
 pub const string_type = TypeConstructor(BuiltInType(StringType), [])
 
 pub fn list_type(item_type: Type) {
@@ -160,11 +169,6 @@ pub type Field(t) {
   Field(label: Option(String), item: t)
 }
 
-// Detailed info on one module, high-level info on other modules
-pub type Analysis {
-  Analysis(module: ModuleDetail, modules: Dict(ModuleId, Module))
-}
-
 // Will include only high level type information and signatures
 pub type Module {
   Module(
@@ -174,11 +178,6 @@ pub type Module {
     custom_types: Dict(String, CustomType),
     functions: Dict(String, FunctionSignature),
   )
-}
-
-// Will include types for expressions
-pub type ModuleDetail {
-  ModuleDetail(module: Module)
 }
 
 pub type TrapKind {
@@ -1165,47 +1164,6 @@ pub fn init_inference_clause(
   )
 }
 
-pub fn init_inference_function(
-  def: glance.Definition(glance.Function),
-  expected_type: Type,
-  environment: Dict(String, Type),
-  context: Context,
-) -> Result(#(Context, Function), CompilerError) {
-  let exp_target = context.internals.project.target
-  let maybe_external =
-    list.find_map(def.attributes, fn(attr) {
-      case attr {
-        glance.Attribute(
-          name: "external",
-          arguments: [
-            glance.Variable(target),
-            glance.String(path),
-            glance.String(name),
-          ],
-        )
-          if target == exp_target
-        -> Ok(External(path, name))
-        _ -> Error(Nil)
-      }
-    })
-  case maybe_external {
-    Ok(external) ->
-      init_inference_external_function(
-        def.definition,
-        external,
-        expected_type,
-        context,
-      )
-    Error(Nil) ->
-      init_inference_gleam_function(
-        def.definition,
-        expected_type,
-        environment,
-        context,
-      )
-  }
-}
-
 fn init_inference_external_function(
   def: glance.Function,
   external: FunctionBody,
@@ -1327,6 +1285,47 @@ pub fn infer_functions(
   )
   solve_constraints(context)
   |> result.map(fn(subs) { list.map(functions, substitute_function(_, subs)) })
+}
+
+fn init_inference_function(
+  def: glance.Definition(glance.Function),
+  expected_type: Type,
+  environment: Dict(String, Type),
+  context: Context,
+) -> Result(#(Context, Function), CompilerError) {
+  let exp_target = context.internals.project.target
+  let maybe_external =
+    list.find_map(def.attributes, fn(attr) {
+      case attr {
+        glance.Attribute(
+          name: "external",
+          arguments: [
+            glance.Variable(target),
+            glance.String(path),
+            glance.String(name),
+          ],
+        )
+          if target == exp_target
+        -> Ok(External(path, name))
+        _ -> Error(Nil)
+      }
+    })
+  case maybe_external {
+    Ok(external) ->
+      init_inference_external_function(
+        def.definition,
+        external,
+        expected_type,
+        context,
+      )
+    Error(Nil) ->
+      init_inference_gleam_function(
+        def.definition,
+        expected_type,
+        environment,
+        context,
+      )
+  }
 }
 
 pub fn infer_function(
@@ -1500,9 +1499,9 @@ pub fn init_inference(
             glance.FnParameter(glance.Discarded(_), _) -> False
           }
         })
-        |> list.map(pair.map_first(_, fn(p) {
-          assignment_name_to_string(p.name)
-        }))
+        |> list.map(
+          pair.map_first(_, fn(p) { assignment_name_to_string(p.name) }),
+        )
         |> dict.from_list
         |> dict.merge(environment, _)
 
@@ -1552,10 +1551,8 @@ pub fn init_inference(
       use #(context, args) <- result.map(
         pair_args(signature, fields, compiler.AtExpression(expr))
         |> result.map(list.index_map(_, fn(v, i) { #(i, v) }))
-        |> result.try(try_map_fold(
-          over: _,
-          from: context,
-          with: fn(context, arg) {
+        |> result.try(
+          try_map_fold(over: _, from: context, with: fn(context, arg) {
             let #(pos, #(field_type, maybe_expr)) = arg
             case maybe_expr {
               None ->
@@ -1569,8 +1566,8 @@ pub fn init_inference(
               Some(expr) ->
                 init_inference(expr, field_type, environment, context)
             }
-          },
-        )),
+          }),
+        ),
       )
       // now call the constructor
       #(
@@ -2217,11 +2214,13 @@ pub fn resolve_type(
                 list.length(exp_params),
                 list.length(act_params),
               ))
-              |> result.try(list.try_map(_, fn(param_def) {
-                let #(param_name, param_type) = param_def
-                resolve_type(data, param_type)
-                |> result.map(pair.new(param_name, _))
-              }))
+              |> result.try(
+                list.try_map(_, fn(param_def) {
+                  let #(param_name, param_type) = param_def
+                  resolve_type(data, param_type)
+                  |> result.map(pair.new(param_name, _))
+                }),
+              )
               |> result.map(fn(params) {
                 case nested_type {
                   TypeConstructor(_, _) | FunctionType(_, _) ->
@@ -2245,6 +2244,8 @@ pub fn resolve_type(
             "Float", None, [] -> Ok(float_type)
             "String", None, [] -> Ok(string_type)
             "Bool", None, [] -> Ok(bool_type)
+            "UtfCodepoint", None, [] -> Ok(utf_codepoint_type)
+            "BitArray", None, [] -> Ok(bit_array_type)
             "Nil", None, [] -> Ok(nil_type)
             "List", None, [item_type] ->
               resolve_type(data, item_type)
@@ -2600,15 +2601,60 @@ pub fn prototype_function_signature(
   FunctionSignature(name, pos_args, lab_args, return)
 }
 
-fn analyze_high_level(
+fn parse_module_imports(
+  project: Project,
+  module_id: ModuleId,
+) -> Result(List(ModuleId), CompilerError) {
+  use parsed <- result.try(project.parse_module(project, module_id))
+  list.try_map(parsed.imports, fn(import_) {
+    case import_ {
+      glance.Definition(definition: glance.Import(module: module_name, ..), ..) -> {
+        resolve_module(project, module_id.package_name, module_name)
+        |> result.map(fn(imported_module_id) { imported_module_id })
+      }
+    }
+  })
+}
+
+pub fn analyze_project_imports(
+  p: Project,
+) -> Result(graph.Graph(ModuleId), CompilerError) {
+  dict.values(p.packages)
+  |> list.try_map(fn(package) {
+    case package {
+      project.GleamPackage(name:, modules:, ..) -> {
+        let modules =
+          set.to_list(modules)
+          |> list.map(fn(module) { project.ModuleId(name, module) })
+        use imports <- result.map(
+          list.try_map(modules, fn(module_id) {
+            parse_module_imports(p, module_id)
+            |> result.map(
+              list.map(_, fn(imported_module_id) {
+                #(module_id, imported_module_id)
+              }),
+            )
+          })
+          |> result.map(list.flatten),
+        )
+        #(modules, imports)
+      }
+      _ -> Ok(#([], []))
+    }
+  })
+  |> result.map(
+    list.fold(_, #([], []), fn(a, b) {
+      #(list.append(a.0, b.0), list.append(a.1, b.1))
+    }),
+  )
+}
+
+pub fn analyze_module(
   project: Project,
   location: ModuleId,
   modules: Dict(ModuleId, Module),
-) -> Result(#(Module, Dict(ModuleId, Module)), CompilerError) {
-  use _ <- result.try_recover(
-    dict.get(modules, location)
-    |> result.map(fn(module) { #(module, modules) }),
-  )
+  callback: fn(ModuleInternals, List(Function)) -> Result(Nil, CompilerError),
+) -> Result(Module, CompilerError) {
   pprint.debug(
     ">>> analyze_high_level "
     <> location.module_path
@@ -2616,8 +2662,8 @@ fn analyze_high_level(
     <> location.package_name,
   )
   use parsed <- result.try(project.parse_module(project, location))
-  use #(modules, imports) <- result.try(
-    try_map_fold(parsed.imports, modules, fn(modules, import_) {
+  use imports <- result.try(
+    list.try_map(parsed.imports, fn(import_) {
       use #(alias, location) <- result.try(case import_ {
         glance.Definition(
           definition: glance.Import(
@@ -2638,12 +2684,18 @@ fn analyze_high_level(
           })
         }
       })
-      use #(module, modules) <- result.map(analyze_high_level(
-        project,
-        location,
-        modules,
-      ))
-      #(dict.insert(modules, location, module), #(alias, module.location))
+      //      use #(module, modules) <- result.map(analyze_high_level(
+      //        project,
+      //        location,
+      //        modules,
+      //      ))
+      use module <- result.map(
+        dict.get(modules, location)
+        |> result.replace_error(compiler.ReferenceError(
+          location.package_name <> ":" <> location.module_path,
+        )),
+      )
+      #(alias, module.location)
     }),
   )
   let imports = dict.from_list(imports)
@@ -2707,8 +2759,11 @@ fn analyze_high_level(
     <> location.package_name,
   )
 
+  let target_functions =
+    list.filter(parsed.functions, exists_for_target(_, project.target))
+
   use function_prototypes <- result.try(
-    list.try_map(parsed.functions, fn(def) {
+    list.try_map(target_functions, fn(def) {
       prototype_function_signature(internals, def)
       |> result.map(fn(signature) { #(signature.name, signature) })
     })
@@ -2722,10 +2777,36 @@ fn analyze_high_level(
     |> list.map(fn(constructor) { #(constructor.name, constructor) })
     |> dict.from_list
 
+  // TODO: currently assuming all imported values are functions
+  // TODO: aliased unqualified imports
+  use unqualified_imports <- result.try(
+    list.flat_map(parsed.imports, fn(import_) {
+      let glance.Definition(_, glance.Import(module:, unqualified_values:, ..)) =
+        import_
+      list.map(unqualified_values, fn(value) { #(module, value.name) })
+    })
+    |> list.try_map(fn(import_) {
+      let #(module_name, value_name) = import_
+      use module_id <- result.try(resolve_module(
+        project,
+        location.package_name,
+        module_name,
+      ))
+      use module <- result.try(
+        dict.get(modules, module_id)
+        |> result.replace_error(compiler.ReferenceError(module_name)),
+      )
+      lookup(module.functions, value_name)
+      |> result.map(fn(signature) { #(value_name, signature) })
+    })
+    |> result.map(dict.from_list),
+  )
+
   let internals =
     ModuleInternals(
       ..internals,
-      functions: dict.merge(function_prototypes, constructor_prototypes),
+      functions: dict.merge(function_prototypes, constructor_prototypes)
+        |> dict.merge(unqualified_imports),
     )
   // TODO: resolve constants
 
@@ -2738,7 +2819,7 @@ fn analyze_high_level(
   // call graph analysis
   // TODO: probably ID referenced functions from the raw inputs and run inference only afterwards
   use functions <- result.try(
-    parsed.functions
+    target_functions
     |> list.try_map(infer_function(internals, _))
     |> result.map(list.map(_, fn(fun) { #(fun.signature.name, fun) }))
     |> result.map(dict.from_list),
@@ -2765,28 +2846,28 @@ fn analyze_high_level(
   use internals <- result.map(
     graph.topological_sort(nodes, edges)
     |> result.replace_error(compiler.AnotherTypeError("Cycle appeared..."))
-    |> result.try(list.try_fold(
-      over: _,
-      from: internals,
-      with: fn(internals, fn_names) {
+    |> result.try(
+      list.try_fold(over: _, from: internals, with: fn(internals, fn_names) {
         list.try_map(fn_names, fn(name) {
-          list.find(parsed.functions, fn(fun) { fun.definition.name == name })
+          list.find(target_functions, fn(fun) { fun.definition.name == name })
         })
         |> result.replace_error(compiler.AnotherTypeError(
           "Function disappeared...",
         ))
         |> result.try(infer_functions(internals, _))
         |> result.map(fn(functions) {
-          // TODO: maybe not throw the function bodies away :'(
-          ModuleInternals(
-            ..internals,
-            functions: list.fold(functions, internals.functions, fn(d, fun) {
-              dict.insert(d, fun.signature.name, fun.signature)
-            }),
-          )
+          let internals =
+            ModuleInternals(
+              ..internals,
+              functions: list.fold(functions, internals.functions, fn(d, fun) {
+                dict.insert(d, fun.signature.name, fun.signature)
+              }),
+            )
+          callback(internals, functions)
+          internals
         })
-      },
-    )),
+      }),
+    ),
   )
 
   let public_constructors =
@@ -2801,7 +2882,7 @@ fn analyze_high_level(
     |> list.flatten
 
   let public_functions =
-    list.map(parsed.functions, fn(fun) {
+    list.map(target_functions, fn(fun) {
       let glance.Definition(_attr, glance.Function(name:, publicity:, ..)) = fun
       #(name, publicity)
     })
@@ -2810,69 +2891,32 @@ fn analyze_high_level(
     |> list.append(public_constructors)
     |> set.from_list
 
-  #(
-    module_from_internals(ModuleInternals(..internals, public_functions:)),
-    modules,
-  )
+  module_from_internals(ModuleInternals(..internals, public_functions:))
 }
 
-pub fn analyze_module(
-  project: Project,
-  location: ModuleId,
-  modules: Dict(ModuleId, Module),
-) -> Result(Analysis, CompilerError) {
-  use #(module, modules) <- result.map(analyze_high_level(
-    project,
-    location,
-    modules,
-  ))
-  Analysis(ModuleDetail(module), dict.insert(modules, location, module))
-}
-
-pub type ModDeps {
-  ModDeps(module: String, deps: List(ModDeps))
-}
-
-fn to_dep_tree_internal(
-  location: ModuleId,
-  modules: Dict(ModuleId, Module),
-) -> ModDeps {
-  ModDeps(
-    location.module_path,
-    list.map(
-      dict.get(modules, location)
-        |> result.map(fn(module) { dict.values(module.imports) })
-        |> result.unwrap([]),
-      to_dep_tree_internal(_, modules),
-    ),
-  )
-}
-
-fn to_dep_tree(analysis: Analysis) {
-  to_dep_tree_internal(analysis.module.module.location, analysis.modules)
-}
-
-fn print_dep_tree(tree: ModDeps, indent: String) -> String {
-  [
-    indent <> tree.module,
-    ..list.map(tree.deps, print_dep_tree(_, indent <> "  "))
-  ]
-  |> string.join("\n")
-}
-
-pub fn main() {
-  project.scan_project(".", "javascript")
-  |> result.try(fn(project) {
-    analyze_module(
-      project,
-      project.ModuleId(project.name, "example"),
-      dict.new(),
-    )
-  })
-  |> pprint.debug()
-  |> result.map(to_dep_tree)
-  |> result.map(print_dep_tree(_, ""))
-  |> result.map(io.println)
-  |> result.map(fn(_) { Nil })
-  |> io.debug()
+fn exists_for_target(
+  def: glance.Definition(glance.Function),
+  target: String,
+) -> Bool {
+  let glance.Definition(attributes, _) = def
+  let externals =
+    list.filter_map(attributes, fn(attr) {
+      case attr {
+        glance.Attribute("external", args) -> Ok(args)
+        _ -> Error(Nil)
+      }
+    })
+  let target_external =
+    list.find(externals, fn(ext) {
+      case ext {
+        [glance.Variable(name), ..] if name == target -> True
+        _ -> False
+      }
+    })
+  case list.is_empty(externals), target_external, def.definition.body {
+    True, _, _ -> True
+    _, Ok(_), _ -> True
+    _, _, [_, ..] -> True
+    _, _, _ -> False
+  }
 }

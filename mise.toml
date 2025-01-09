@@ -3,4 +3,4 @@
 elixir = "latest"
 erlang = "latest"
 node = "22"
-gleam = "1.6"
+gleam = "1.7.0"

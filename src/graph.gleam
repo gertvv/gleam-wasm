@@ -2,10 +2,13 @@ import gleam/list
 import gleam/pair
 import gleam/set.{type Set}
 
+pub type Graph(node) =
+  #(List(node), List(#(node, node)))
+
 pub fn squash_cycles(
   nodes: List(node),
   edges: List(#(node, node)),
-) -> #(List(List(node)), List(#(List(node), List(node)))) {
+) -> Graph(List(node)) {
   let nodes = list.map(nodes, fn(node) { [node] })
   let edges =
     edges
@@ -20,7 +23,7 @@ fn squash_cycles_internal(
   remaining_nodes: List(List(node)),
   edges: List(#(List(node), List(node))),
   squashed_nodes: List(List(node)),
-) -> #(List(List(node)), List(#(List(node), List(node)))) {
+) -> Graph(List(node)) {
   case remaining_nodes {
     [] -> #(squashed_nodes, edges)
     [node, ..rest] -> {

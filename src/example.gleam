@@ -1,7 +1,3 @@
-import gleam/int
-
-import gleam/list
-
 fn add(a, b) {
   a + b
 }
@@ -17,5 +13,5 @@ fn fold(list: List(a), initial: acc, fun: fn(acc, a) -> acc) -> acc {
 }
 
 pub fn sum(numbers) {
-  list.fold(numbers, 0, int.add)
+  fold(numbers, 0, add)
 }

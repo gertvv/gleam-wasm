@@ -12,7 +12,7 @@ import project
 
 fn empty_module_internals(package_name, module_path) {
   let project =
-    project.Project(package_name, "javascript", dict.new(), fn(_a, _b) {
+    project.Project(package_name, ".", "javascript", dict.new(), fn(_a, _b) {
       Error(compiler.ReferenceError("test"))
     })
   let location = project.ModuleId(package_name, module_path)
@@ -185,7 +185,7 @@ pub fn resolve_basic_types_test() {
 
 pub fn resolve_dependent_custom_types_test() {
   let project =
-    project.Project("test", "javascript", dict.new(), fn(_a, _b) {
+    project.Project("test", ".", "javascript", dict.new(), fn(_a, _b) {
       Error(compiler.ReferenceError("foo"))
     })
   let location = project.ModuleId("test", "bar")
@@ -351,7 +351,7 @@ pub fn resolve_dependent_custom_types_test() {
 
 pub fn resolve_type_aliases_test() {
   let project =
-    project.Project("test", "javascript", dict.new(), fn(_a, _b) {
+    project.Project("test", ".", "javascript", dict.new(), fn(_a, _b) {
       Error(compiler.ReferenceError("foo"))
     })
   let location = project.ModuleId("test", "bar")
@@ -1128,7 +1128,7 @@ pub fn type_infer_constructor_pattern_test() {
     analysis.CustomType([], False, [variant_a, variant_b])
   let internals =
     analysis.ModuleInternals(
-      project: project.Project("name", "javascript", dict.new(), fn(_, _) {
+      project: project.Project("name", ".", "javascript", dict.new(), fn(_, _) {
         panic
       }),
       location: module_id,
@@ -1236,7 +1236,7 @@ pub fn type_infer_field_access_test() {
     )
   let internals =
     analysis.ModuleInternals(
-      project: project.Project("name", "javascript", dict.new(), fn(_, _) {
+      project: project.Project("name", ".", "javascript", dict.new(), fn(_, _) {
         panic
       }),
       location: module_id,

@@ -140,7 +140,7 @@ pub fn main() {
       ),
     ])
   simplifile.read("example.gleam")
-  |> result.map_error(compiler.FileError)
+  |> result.map_error(compiler.FileError("example.gleam", _))
   |> result.try(fn(str) {
     glance.module(str)
     |> result.map_error(compiler.ParseError)
@@ -189,7 +189,7 @@ pub fn main() {
   |> result.map(wat.to_string)
   |> result.try(fn(code_str) {
     simplifile.write("generated.wat", code_str)
-    |> result.map_error(compiler.FileError)
+    |> result.map_error(compiler.FileError("generated.wat", _))
   })
   |> io.debug
 }
