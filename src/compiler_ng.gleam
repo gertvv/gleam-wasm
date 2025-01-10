@@ -31,8 +31,14 @@ pub fn impl() {
       project,
       module_id,
       modules,
-      compile_functions,
     ))
+
+    list.each(module.sorted_functions, fn(funcs) {
+      list.try_map(funcs, dict.get(module.functions, _))
+      |> result.map(compile_functions(module, _))
+    })
+
+    let module = analysis.module_from_internals(module)
     dict.insert(modules, module_id, module)
   })
 }

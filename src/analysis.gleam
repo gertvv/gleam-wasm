@@ -446,13 +446,13 @@ fn internals_as_module(internals: ModuleInternals) -> ModuleInterface {
     dict.map_values(internals.imports, fn(_, m) { m.location }),
     internals.types,
     internals.custom_types,
-    internals.functions,
+    dict.map_values(internals.functions, fn(_, func) { func.signature }),
   )
 }
 
 /// Convert `ModuleInternals` to a `ModuleInterface`.
 /// Removes reference to any private types and functions.
-fn module_from_internals(internals: ModuleInternals) -> ModuleInterface {
+pub fn module_from_internals(internals: ModuleInternals) -> ModuleInterface {
   ModuleInterface(
     internals.location,
     dict.map_values(internals.imports, fn(_, m) { m.location }),
@@ -462,9 +462,8 @@ fn module_from_internals(internals: ModuleInternals) -> ModuleInterface {
     dict.filter(internals.custom_types, fn(k, _v) {
       set.contains(internals.public_types, k)
     }),
-    dict.filter(internals.functions, fn(k, _v) {
-      set.contains(internals.public_functions, k)
-    }),
+    dict.map_values(internals.functions, fn(_, func) { func.signature })
+      |> dict.filter(fn(k, _v) { set.contains(internals.public_functions, k) }),
   )
 }
 
@@ -1397,6 +1396,7 @@ pub fn init_inference(
         }),
       )
       lookup(context.internals.functions, name)
+      |> result.map(function_signature)
       |> result.map(maybe_call_no_arg_constructor(
         context.internals.location,
         _,
@@ -1724,6 +1724,10 @@ pub fn get_sub(context: Context, t: Type) -> Result(Type, Nil) {
       })
     _ -> Error(Nil)
   }
+}
+
+fn function_signature(f: Function) -> FunctionSignature {
+  f.signature
 }
 
 fn occurs_in(var: String, t: Type) -> Bool {
@@ -2149,7 +2153,8 @@ pub type ModuleInternals {
     imports: Dict(String, ModuleInterface),
     types: Dict(String, GenericType),
     custom_types: Dict(String, CustomType),
-    functions: Dict(String, FunctionSignature),
+    functions: Dict(String, Function),
+    sorted_functions: List(List(String)),
     public_types: Set(String),
     public_functions: Set(String),
   )
@@ -2460,6 +2465,7 @@ pub fn resolve_types(
       types: prototypes,
       custom_types: dict.new(),
       functions: dict.new(),
+      sorted_functions: [],
       public_types: set.new(),
       public_functions: set.new(),
     )
@@ -2652,8 +2658,7 @@ pub fn analyze_module(
   project: Project,
   location: ModuleId,
   modules: Dict(ModuleId, ModuleInterface),
-  callback: fn(ModuleInternals, List(Function)) -> Result(Nil, CompilerError),
-) -> Result(ModuleInterface, CompilerError) {
+) -> Result(ModuleInternals, CompilerError) {
   pprint.debug(
     ">>> analyze_high_level "
     <> location.module_path
@@ -2683,11 +2688,6 @@ pub fn analyze_module(
           })
         }
       })
-      //      use #(module, modules) <- result.map(analyze_high_level(
-      //        project,
-      //        location,
-      //        modules,
-      //      ))
       use module <- result.map(
         dict.get(modules, location)
         |> result.replace_error(compiler.ReferenceError(
@@ -2805,7 +2805,10 @@ pub fn analyze_module(
     ModuleInternals(
       ..internals,
       functions: dict.merge(function_prototypes, constructor_prototypes)
-        |> dict.merge(unqualified_imports),
+        |> dict.merge(unqualified_imports)
+        |> dict.map_values(fn(_, signature) {
+          Function(signature, [], GleamBody([]))
+        }),
     )
   // TODO: resolve constants
 
@@ -2842,11 +2845,16 @@ pub fn analyze_module(
     })
   let nodes = dict.keys(functions)
   let #(nodes, edges) = graph.squash_cycles(nodes, edges)
-  use internals <- result.map(
+  use sorted_functions <- result.try(
     graph.topological_sort(nodes, edges)
-    |> result.replace_error(compiler.AnotherTypeError("Cycle appeared..."))
-    |> result.try(
-      list.try_fold(over: _, from: internals, with: fn(internals, fn_names) {
+    |> result.replace_error(compiler.CircularDependencyError),
+  )
+  let internals = ModuleInternals(..internals, sorted_functions:)
+  use internals <- result.map(
+    list.try_fold(
+      over: sorted_functions,
+      from: internals,
+      with: fn(internals, fn_names) {
         list.try_map(fn_names, fn(name) {
           list.find(target_functions, fn(fun) { fun.definition.name == name })
         })
@@ -2855,17 +2863,14 @@ pub fn analyze_module(
         ))
         |> result.try(infer_functions(internals, _))
         |> result.map(fn(functions) {
-          let internals =
-            ModuleInternals(
-              ..internals,
-              functions: list.fold(functions, internals.functions, fn(d, fun) {
-                dict.insert(d, fun.signature.name, fun.signature)
-              }),
-            )
-          callback(internals, functions)
-          internals
+          ModuleInternals(
+            ..internals,
+            functions: list.fold(functions, internals.functions, fn(d, func) {
+              dict.insert(d, func.signature.name, func)
+            }),
+          )
         })
-      }),
+      },
     ),
   )
 
@@ -2890,7 +2895,7 @@ pub fn analyze_module(
     |> list.append(public_constructors)
     |> set.from_list
 
-  module_from_internals(ModuleInternals(..internals, public_functions:))
+  ModuleInternals(..internals, public_functions:)
 }
 
 fn exists_for_target(
