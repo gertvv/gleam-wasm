@@ -3,7 +3,6 @@ import glance
 import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/int
-import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/order
@@ -170,8 +169,8 @@ pub type Field(t) {
 }
 
 // Will include only high level type information and signatures
-pub type Module {
-  Module(
+pub type ModuleInterface {
+  ModuleInterface(
     location: ModuleId,
     imports: Dict(String, ModuleId),
     types: Dict(String, GenericType),
@@ -439,10 +438,10 @@ pub fn pair_args(
   |> Ok
 }
 
-/// Treat the `ModuleInternals` as a `Module`.
+/// Treat the `ModuleInternals` as a `ModuleInterface`.
 /// Enables uniform lookup of type and function data.
-fn internals_as_module(internals: ModuleInternals) -> Module {
-  Module(
+fn internals_as_module(internals: ModuleInternals) -> ModuleInterface {
+  ModuleInterface(
     internals.location,
     dict.map_values(internals.imports, fn(_, m) { m.location }),
     internals.types,
@@ -451,10 +450,10 @@ fn internals_as_module(internals: ModuleInternals) -> Module {
   )
 }
 
-/// Convert `ModuleInternals` to a `Module`.
+/// Convert `ModuleInternals` to a `ModuleInterface`.
 /// Removes reference to any private types and functions.
-fn module_from_internals(internals: ModuleInternals) -> Module {
-  Module(
+fn module_from_internals(internals: ModuleInternals) -> ModuleInterface {
+  ModuleInterface(
     internals.location,
     dict.map_values(internals.imports, fn(_, m) { m.location }),
     dict.filter(internals.types, fn(k, _v) {
@@ -472,7 +471,7 @@ fn module_from_internals(internals: ModuleInternals) -> Module {
 fn find_module_by_name(
   internals: ModuleInternals,
   maybe_module_name: Option(String),
-) -> Result(Module, compiler.CompilerError) {
+) -> Result(ModuleInterface, compiler.CompilerError) {
   case maybe_module_name {
     None -> Ok(internals_as_module(internals))
     Some(module_name) -> lookup(internals.imports, module_name)
@@ -482,7 +481,7 @@ fn find_module_by_name(
 fn find_module_by_id(
   internals: ModuleInternals,
   module_id: ModuleId,
-) -> Result(Module, compiler.CompilerError) {
+) -> Result(ModuleInterface, compiler.CompilerError) {
   dict.values(internals.imports)
   |> list.find(fn(module) { module.location == module_id })
   |> result.lazy_or(fn() {
@@ -2147,7 +2146,7 @@ pub type ModuleInternals {
   ModuleInternals(
     project: Project,
     location: ModuleId,
-    imports: Dict(String, Module),
+    imports: Dict(String, ModuleInterface),
     types: Dict(String, GenericType),
     custom_types: Dict(String, CustomType),
     functions: Dict(String, FunctionSignature),
@@ -2435,7 +2434,7 @@ pub fn resolve_types(
   project: Project,
   location: ModuleId,
   imports: Dict(String, ModuleId),
-  modules: Dict(ModuleId, Module),
+  modules: Dict(ModuleId, ModuleInterface),
   parsed: glance.Module,
 ) -> Result(ModuleInternals, CompilerError) {
   // Create prototypes (placeholders) for all declared types
@@ -2652,9 +2651,9 @@ pub fn analyze_project_imports(
 pub fn analyze_module(
   project: Project,
   location: ModuleId,
-  modules: Dict(ModuleId, Module),
+  modules: Dict(ModuleId, ModuleInterface),
   callback: fn(ModuleInternals, List(Function)) -> Result(Nil, CompilerError),
-) -> Result(Module, CompilerError) {
+) -> Result(ModuleInterface, CompilerError) {
   pprint.debug(
     ">>> analyze_high_level "
     <> location.module_path

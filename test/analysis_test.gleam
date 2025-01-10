@@ -620,7 +620,7 @@ pub fn type_infer_function_using_import_test() {
     ])
 
   let module_int =
-    analysis.Module(
+    analysis.ModuleInterface(
       project.ModuleId("gleam_stdlib", "gleam/int"),
       dict.new(),
       dict.new(),
@@ -784,7 +784,7 @@ pub fn type_infer_function_with_return_annotation_test() {
       [analysis.TypeVariable("a")],
     )
   let option_module =
-    analysis.Module(
+    analysis.ModuleInterface(
       location: option_module_id,
       imports: dict.new(),
       types: dict.from_list([
