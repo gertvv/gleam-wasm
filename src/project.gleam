@@ -162,6 +162,11 @@ pub fn main() {
   |> io.debug
 }
 
+pub fn package_build_path(project: Project, package_name: String) -> String {
+  [project.source_path, "build", "dev", project.target, package_name]
+  |> list.fold("", filepath.join)
+}
+
 fn package_source_path(project_name, source_path, package_name) {
   case package_name == project_name {
     True -> source_path
