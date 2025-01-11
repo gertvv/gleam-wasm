@@ -446,7 +446,7 @@ fn internals_as_module(internals: ModuleInternals) -> ModuleInterface {
     dict.map_values(internals.imports, fn(_, m) { m.location }),
     internals.types,
     internals.custom_types,
-    dict.map_values(internals.functions, fn(_, func) { func.signature }),
+    internals.functions,
   )
 }
 
@@ -462,8 +462,9 @@ pub fn module_from_internals(internals: ModuleInternals) -> ModuleInterface {
     dict.filter(internals.custom_types, fn(k, _v) {
       set.contains(internals.public_types, k)
     }),
-    dict.map_values(internals.functions, fn(_, func) { func.signature })
-      |> dict.filter(fn(k, _v) { set.contains(internals.public_functions, k) }),
+    dict.filter(internals.functions, fn(k, _v) {
+      set.contains(internals.public_functions, k)
+    }),
   )
 }
 
@@ -1396,7 +1397,6 @@ pub fn init_inference(
         }),
       )
       lookup(context.internals.functions, name)
-      |> result.map(function_signature)
       |> result.map(maybe_call_no_arg_constructor(
         context.internals.location,
         _,
@@ -2146,6 +2146,7 @@ fn resolve_module(
   |> result.replace_error(compiler.ReferenceError(imported_module))
 }
 
+// TODO: distinguish between types/functions accessible within the module vs defined within it?
 pub type ModuleInternals {
   ModuleInternals(
     project: Project,
@@ -2153,8 +2154,8 @@ pub type ModuleInternals {
     imports: Dict(String, ModuleInterface),
     types: Dict(String, GenericType),
     custom_types: Dict(String, CustomType),
-    functions: Dict(String, Function),
-    sorted_functions: List(List(String)),
+    functions: Dict(String, FunctionSignature),
+    implemented_functions: List(List(Function)),
     public_types: Set(String),
     public_functions: Set(String),
   )
@@ -2406,9 +2407,104 @@ fn prototype_custom_type(
   }
 }
 
-fn referenced_functions_clause(clause: Clause) -> List(FunctionId) {
-  let Clause(_patterns, _variables, _guard, body) = clause
-  referenced_functions_expr(body)
+pub fn referenced_types(fun: Function) -> List(TypeId) {
+  let signature_types = case fun {
+    Function(
+      FunctionSignature(_, positional_parameters:, labeled_parameters:, return:),
+      _,
+      _,
+    ) ->
+      [
+        positional_parameters,
+        list.map(labeled_parameters, fn(labeled) { labeled.item }),
+        [return],
+      ]
+      |> list.flatten
+      |> list.flat_map(referenced_types_type)
+  }
+  let body_types = case fun {
+    Function(_, _, GleamBody(block)) -> referenced_types_block(block)
+    _ -> []
+  }
+  list.append(signature_types, body_types)
+}
+
+fn referenced_types_block(statement_list: List(Statement)) -> List(TypeId) {
+  list.flat_map(statement_list, fn(stmt) {
+    case stmt {
+      Assignment(value:, ..) -> {
+        // TODO: I don't think the pattern can reference an types that the value doesn't but double check!
+        referenced_types_expr(value)
+      }
+      Expression(expr) -> referenced_types_expr(expr)
+    }
+  })
+}
+
+fn referenced_types_expr(expr: Expression) -> List(TypeId) {
+  case expr {
+    Call(function:, arguments:) ->
+      list.flat_map([function, ..arguments], referenced_types_expr)
+    Case(typ:, subjects:, clauses:) ->
+      [
+        referenced_types_type(typ),
+        list.flat_map(subjects, referenced_types_expr),
+        list.flat_map(clauses, referenced_types_clause),
+      ]
+      |> list.flatten
+    Float(_) -> [BuiltInType(FloatType)]
+    Fn(typ:, body:, ..) ->
+      [referenced_types_type(typ), referenced_types_block(body)] |> list.flatten
+    FunctionReference(typ:, ..) -> referenced_types_type(typ)
+    Int(_) -> [BuiltInType(IntType)]
+    String(_) -> [BuiltInType(StringType)]
+    Trap(typ:, detail:, ..) ->
+      [
+        referenced_types_type(typ),
+        option.map(detail, referenced_types_expr) |> option.unwrap([]),
+      ]
+      |> list.flatten
+    Variable(typ, _) -> referenced_types_type(typ)
+  }
+}
+
+fn referenced_types_clause(c: Clause) -> List(TypeId) {
+  // TODO: again we assume no new types occur in the Pattern or Variables
+  case c {
+    Clause(guard:, body:, ..) ->
+      list.flat_map([guard, body], referenced_types_expr)
+  }
+}
+
+fn referenced_types_type(t: Type) -> List(TypeId) {
+  case t {
+    FunctionType(parameters:, return:) ->
+      list.flat_map([return, ..parameters], referenced_types_type)
+    TypeConstructor(generic_type:, assigned_types:) -> [
+      generic_type,
+      ..list.flat_map(assigned_types, referenced_types_type)
+    ]
+    TypeVariable(_) -> []
+  }
+}
+
+pub fn referenced_functions(fun: Function) -> List(FunctionId) {
+  let Function(body:, ..) = fun
+  case body {
+    GleamBody(body) -> referenced_functions_block(body)
+    _ -> []
+  }
+}
+
+fn referenced_functions_block(
+  statement_list: List(Statement),
+) -> List(FunctionId) {
+  list.flat_map(statement_list, fn(stmt) {
+    case stmt {
+      Assignment(_kind, _pattern, expr) -> referenced_functions_expr(expr)
+      Expression(expr) -> referenced_functions_expr(expr)
+    }
+  })
 }
 
 fn referenced_functions_expr(expr: Expression) -> List(FunctionId) {
@@ -2419,20 +2515,15 @@ fn referenced_functions_expr(expr: Expression) -> List(FunctionId) {
         subjects |> list.flat_map(referenced_functions_expr),
         clauses |> list.flat_map(referenced_functions_clause),
       )
-    Fn(_type, _arg_names, body) -> referenced_functions(body)
+    Fn(_type, _arg_names, body) -> referenced_functions_block(body)
     FunctionReference(_type, id) -> [id]
     Int(_) | Float(_) | String(_) | Trap(_, _, _) | Variable(_, _) -> []
   }
 }
 
-fn referenced_functions(statement_list: List(Statement)) -> List(FunctionId) {
-  statement_list
-  |> list.flat_map(fn(stmt) {
-    case stmt {
-      Assignment(_kind, _pattern, expr) -> referenced_functions_expr(expr)
-      Expression(expr) -> referenced_functions_expr(expr)
-    }
-  })
+fn referenced_functions_clause(clause: Clause) -> List(FunctionId) {
+  let Clause(_patterns, _variables, _guard, body) = clause
+  referenced_functions_expr(body)
 }
 
 pub fn resolve_types(
@@ -2465,7 +2556,7 @@ pub fn resolve_types(
       types: prototypes,
       custom_types: dict.new(),
       functions: dict.new(),
-      sorted_functions: [],
+      implemented_functions: [],
       public_types: set.new(),
       public_functions: set.new(),
     )
@@ -2805,10 +2896,7 @@ pub fn analyze_module(
     ModuleInternals(
       ..internals,
       functions: dict.merge(function_prototypes, constructor_prototypes)
-        |> dict.merge(unqualified_imports)
-        |> dict.map_values(fn(_, signature) {
-          Function(signature, [], GleamBody([]))
-        }),
+        |> dict.merge(unqualified_imports),
     )
   // TODO: resolve constants
 
@@ -2828,12 +2916,9 @@ pub fn analyze_module(
   )
   let edges =
     dict.to_list(functions)
-    |> list.flat_map(fn(fun) {
-      let #(from_name, Function(body:, ..)) = fun
-      case body {
-        GleamBody(body) -> referenced_functions(body)
-        _ -> []
-      }
+    |> list.flat_map(fn(func) {
+      let #(from_name, func) = func
+      referenced_functions(func)
       |> list.filter_map(fn(ref_fn) {
         case ref_fn {
           FunctionFromModule(module_id, to_name)
@@ -2849,7 +2934,6 @@ pub fn analyze_module(
     graph.topological_sort(nodes, edges)
     |> result.replace_error(compiler.CircularDependencyError),
   )
-  let internals = ModuleInternals(..internals, sorted_functions:)
   use internals <- result.map(
     list.try_fold(
       over: sorted_functions,
@@ -2866,13 +2950,22 @@ pub fn analyze_module(
           ModuleInternals(
             ..internals,
             functions: list.fold(functions, internals.functions, fn(d, func) {
-              dict.insert(d, func.signature.name, func)
+              dict.insert(d, func.signature.name, func.signature)
             }),
+            implemented_functions: [
+              functions,
+              ..internals.implemented_functions
+            ],
           )
         })
       },
     ),
   )
+  let internals =
+    ModuleInternals(
+      ..internals,
+      implemented_functions: list.reverse(internals.implemented_functions),
+    )
 
   let public_constructors =
     list.filter_map(parsed.custom_types, fn(ct) {

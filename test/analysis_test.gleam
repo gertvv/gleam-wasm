@@ -29,10 +29,6 @@ fn empty_module_internals(package_name, module_path) {
   )
 }
 
-fn sig_fn(sig: analysis.FunctionSignature) -> analysis.Function {
-  analysis.Function(sig, [], analysis.GleamBody([]))
-}
-
 pub fn pair_args_test() {
   let at = compiler.AtExpression(glance.String("boo"))
   let named = fn(str, val) { glance.Field(Some(str), val) }
@@ -965,10 +961,7 @@ pub fn type_infer_nested_generics_test() {
     analysis.ModuleInternals(
       ..empty_module_internals("foo", "bar"),
       functions: dict.from_list([
-        #(
-          "Holder",
-          sig_fn(analysis.FunctionSignature("Holder", [a], [], holder(a))),
-        ),
+        #("Holder", analysis.FunctionSignature("Holder", [a], [], holder(a))),
       ]),
     ),
   )
@@ -1144,10 +1137,10 @@ pub fn type_infer_constructor_pattern_test() {
       types: dict.from_list([#("MyType", analysis.GenericType(my_type, []))]),
       custom_types: dict.from_list([#("MyType", my_type_definition)]),
       functions: dict.from_list([
-        #("VariantA", sig_fn(variant_a)),
-        #("VariantB", sig_fn(variant_b)),
+        #("VariantA", variant_a),
+        #("VariantB", variant_b),
       ]),
-      sorted_functions: [],
+      implemented_functions: [],
       public_types: set.new(),
       public_functions: set.new(),
     )
@@ -1253,10 +1246,10 @@ pub fn type_infer_field_access_test() {
       types: dict.from_list([#("MyType", analysis.GenericType(my_type, []))]),
       custom_types: dict.from_list([#("MyType", my_type_definition)]),
       functions: dict.from_list([
-        #("VariantA", sig_fn(variant_a)),
-        #("VariantB", sig_fn(variant_b)),
+        #("VariantA", variant_a),
+        #("VariantB", variant_b),
       ]),
-      sorted_functions: [],
+      implemented_functions: [],
       public_types: set.new(),
       public_functions: set.new(),
     )
@@ -1686,8 +1679,8 @@ pub fn infer_use_test() {
     analysis.ModuleInternals(
       ..empty_module_internals("gleam_stdlib", "gleam/list"),
       functions: dict.from_list([
-        #("fold", sig_fn(fold_signature)),
-        #("reverse", sig_fn(signature)),
+        #("fold", fold_signature),
+        #("reverse", signature),
       ]),
     )
 
@@ -1837,11 +1830,7 @@ pub fn infer_function_test() {
   analysis.infer_function(
     analysis.ModuleInternals(
       ..empty_module_internals("foo", "bar"),
-      functions: dict.from_list([
-        #("add", sig_fn(add)),
-        #("fold", sig_fn(fold)),
-        #("sum", sig_fn(sum)),
-      ]),
+      functions: dict.from_list([#("add", add), #("fold", fold), #("sum", sum)]),
     ),
     glance.Definition(
       [],
@@ -1869,11 +1858,7 @@ pub fn infer_function_test() {
   analysis.infer_function(
     analysis.ModuleInternals(
       ..empty_module_internals("foo", "bar"),
-      functions: dict.from_list([
-        #("add", sig_fn(add)),
-        #("fold", sig_fn(fold)),
-        #("sum", sig_fn(sum)),
-      ]),
+      functions: dict.from_list([#("add", add), #("fold", fold), #("sum", sum)]),
     ),
     glance.Definition(
       [],
@@ -1901,11 +1886,7 @@ pub fn infer_function_test() {
   analysis.infer_function(
     analysis.ModuleInternals(
       ..empty_module_internals("foo", "bar"),
-      functions: dict.from_list([
-        #("add", sig_fn(add)),
-        #("fold", sig_fn(fold)),
-        #("sum", sig_fn(sum)),
-      ]),
+      functions: dict.from_list([#("add", add), #("fold", fold), #("sum", sum)]),
     ),
     glance.Definition(
       [],
@@ -1965,7 +1946,7 @@ pub fn no_arg_constructor_test() {
       ]),
       functions: dict.from_list(
         order.variants
-        |> list.map(fn(variant) { #(variant.name, sig_fn(variant)) }),
+        |> list.map(fn(variant) { #(variant.name, variant) }),
       ),
     )
   infer_single_function(
@@ -2018,7 +1999,7 @@ pub fn result_test() {
         #("Result", analysis.GenericType(result_type, ["a", "b"])),
       ]),
       functions: list.map(result_custom_type.variants, fn(variant) {
-          #(variant.name, sig_fn(variant))
+          #(variant.name, variant)
         })
         |> dict.from_list,
     )
@@ -2055,7 +2036,7 @@ pub fn result_test() {
   let internals =
     analysis.ModuleInternals(
       ..internals,
-      functions: dict.insert(internals.functions, "func", sig_fn(signature)),
+      functions: dict.insert(internals.functions, "func", signature),
     )
 
   analysis.infer_function(internals, make_fn("Ok", glance.Float("3.14")))
@@ -2087,11 +2068,7 @@ fn infer_single_function(
       analysis.infer_function(
         analysis.ModuleInternals(
           ..internals,
-          functions: dict.insert(
-            internals.functions,
-            signature.name,
-            sig_fn(signature),
-          ),
+          functions: dict.insert(internals.functions, signature.name, signature),
         ),
         def,
       )
@@ -2175,23 +2152,17 @@ pub fn fun_with_options_test() {
         #("Option", analysis.GenericType(option_type, ["a"])),
       ]),
       functions: dict.from_list([
-        #(
-          "None",
-          sig_fn(analysis.FunctionSignature("None", [], [], option_type)),
-        ),
+        #("None", analysis.FunctionSignature("None", [], [], option_type)),
         #(
           "is_none",
-          sig_fn(analysis.FunctionSignature(
+          analysis.FunctionSignature(
             "is_none",
             [option_type],
             [],
             analysis.bool_type,
-          )),
+          ),
         ),
-        #(
-          "none",
-          sig_fn(analysis.FunctionSignature("none", [], [], list_option_type)),
-        ),
+        #("none", analysis.FunctionSignature("none", [], [], list_option_type)),
       ]),
     )
 

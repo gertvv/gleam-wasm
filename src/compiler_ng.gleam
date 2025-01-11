@@ -49,10 +49,7 @@ pub fn compile_module(
   // TODO: generate imports
 
   // TODO: generate functions
-  list.each(module.sorted_functions, fn(funcs) {
-    list.try_map(funcs, dict.get(module.functions, _))
-    |> result.map(compile_functions(module, _))
-  })
+  list.each(module.implemented_functions, compile_functions(module, _))
 
   // TODO: generate exports
 
@@ -76,7 +73,10 @@ pub fn compile_functions(
   _internals: analysis.ModuleInternals,
   functions: List(analysis.Function),
 ) {
-  pprint.debug(functions)
+  pprint.debug(list.map(functions, fn(func) { func.signature.name }))
+  list.flat_map(functions, analysis.referenced_types)
+  |> list.unique
+  |> pprint.debug
   Ok(Nil)
 }
 
