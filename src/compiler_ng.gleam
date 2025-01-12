@@ -8,6 +8,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import graph
 import pprint
+import prelude
 import project
 import simplifile
 
@@ -18,6 +19,11 @@ pub fn main() {
 pub fn impl() {
   // TODO: maybe topologically sort the packages, and limit import graph to package boundary?
   use project <- result.try(project.scan_project("../gl_example", "wasm"))
+  use _ <- result.try(output_module(
+    project,
+    project.ModuleId("gleam", "gleam"),
+    prelude.build_prelude(),
+  ))
   use modules <- result.try(
     analysis.analyze_project_imports(project)
     |> result.try(fn(graph) {
@@ -44,6 +50,13 @@ pub fn compile_module(
 ) {
   let mb = wasm.create_module_builder(Some(module.location.module_path))
 
+  use mb <- result.try(
+    prelude.add_prelude_types(mb)
+    |> result.replace_error(compiler.AnotherTypeError(
+      "Failed to add prelude types",
+    )),
+  )
+
   // TODO: generate types
 
   // TODO: generate imports
@@ -53,10 +66,18 @@ pub fn compile_module(
 
   // TODO: generate exports
 
+  output_module(project, module.location, mb)
+}
+
+pub fn output_module(
+  project: project.Project,
+  module_id: project.ModuleId,
+  mb: wasm.ModuleBuilder,
+) -> Result(String, compiler.CompilerError) {
   let wasm_file_name =
     filepath.join(
-      project.package_build_path(project, module.location.package_name),
-      module.location.module_path,
+      project.package_build_path(project, module_id.package_name),
+      module_id.module_path,
     )
     <> ".wasm"
   let wasm_dir_name = filepath.directory_name(wasm_file_name)
@@ -64,6 +85,8 @@ pub fn compile_module(
     simplifile.create_directory_all(wasm_dir_name)
     |> result.map_error(compiler.FileError(wasm_dir_name, _)),
   )
+
+  // TODO: properly return errors
   wasm.emit_module(mb, file_output_stream(wasm_file_name))
   |> pprint.debug
   |> result.replace_error(compiler.AnotherTypeError("Hmm"))

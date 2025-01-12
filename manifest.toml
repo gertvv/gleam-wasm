@@ -3,7 +3,7 @@
 
 packages = [
   { name = "filepath", version = "1.1.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "filepath", source = "hex", outer_checksum = "67A6D15FB39EEB69DD31F8C145BB5A421790581BD6AA14B33D64D5A55DBD6587" },
-  { name = "gl_wasm", version = "1.0.0", build_tools = ["gleam"], requirements = ["gleam_stdlib", "gleb128", "ieee_float", "simplifile"], otp_app = "gl_wasm", source = "hex", outer_checksum = "83E09125A5B1AA11CE14805A63279391467CACFD8993E315AFCBFDFE0DD250D6" },
+  { name = "gl_wasm", version = "1.0.1", build_tools = ["gleam"], requirements = ["gleam_stdlib", "gleb128", "ieee_float", "simplifile"], otp_app = "gl_wasm", source = "hex", outer_checksum = "7C1CDF4A7C36722033DB3CF7852A9334BEE603DC9D082D484793BE33DCAB584D" },
   { name = "glam", version = "2.0.1", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "glam", source = "hex", outer_checksum = "66EC3BCD632E51EED029678F8DF419659C1E57B1A93D874C5131FE220DFAD2B2" },
   { name = "glance", version = "1.1.0", build_tools = ["gleam"], requirements = ["gleam_stdlib", "glexer"], otp_app = "glance", source = "hex", outer_checksum = "E155BA1A787FD11827048355021C0390D2FE9A518485526F631A9D472858CC6D" },
   { name = "gleam_erlang", version = "0.33.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "gleam_erlang", source = "hex", outer_checksum = "A1D26B80F01901B59AABEE3475DD4C18D27D58FA5C897D922FCB9B099749C064" },
@@ -20,7 +20,7 @@ packages = [
 
 [requirements]
 filepath = { version = ">= 1.0.0 and < 2.0.0" }
-gl_wasm = { version = ">= 1.0.0 and < 2.0.0" }
+gl_wasm = { version = ">= 1.0.1 and < 2.0.0" }
 glance = { version = ">= 1.0.0 and < 2.0.0" }
 gleam_stdlib = { version = ">= 0.47.0 and < 1.0.0" }
 gleb128 = { version = ">= 2.1.0 and < 3.0.0" }
