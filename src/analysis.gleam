@@ -22,7 +22,8 @@ import project.{type ModuleId, type Project}
 // - bit string support
 // - hole types
 
-fn try_map_fold(
+// TODO: move somewhere
+pub fn try_map_fold(
   over list: List(a),
   from initial: b,
   with fun: fn(b, a) -> Result(#(b, c), e),
