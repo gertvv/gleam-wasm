@@ -15,6 +15,7 @@ import pprint
 import prelude
 import project
 import simplifile
+import snag.{type Snag}
 
 pub fn main() {
   impl() |> pprint.debug
@@ -22,7 +23,10 @@ pub fn main() {
 
 pub fn impl() {
   // TODO: maybe topologically sort the packages, and limit import graph to package boundary?
-  use project <- result.try(project.scan_project("../gl_example", "wasm"))
+  use project <- result.try(
+    project.scan_project("../gl_example", "wasm")
+    |> snag.map_error(compiler_snag),
+  )
   use _ <- result.try(output_module(
     project,
     project.ModuleId("gleam", "gleam"),
@@ -34,18 +38,31 @@ pub fn impl() {
       let #(nodes, edges) = graph
       graph.topological_sort(nodes, edges)
       |> result.replace_error(compiler.CircularDependencyError)
-    }),
+    })
+    |> snag.map_error(compiler_snag),
   )
   list.try_fold(modules, dict.new(), fn(modules, module_id) {
-    use module <- result.try(analysis.analyze_module(
-      project,
-      module_id,
-      modules,
-    ))
+    use module <- result.try(
+      analysis.analyze_module(project, module_id, modules)
+      |> snag.map_error(compiler_snag),
+    )
     use _ <- result.map(compile_module(project, module))
     let module = analysis.module_from_internals(module)
     dict.insert(modules, module_id, module)
   })
+}
+
+fn compiler_snag(err: compiler.CompilerError) -> String {
+  case err {
+    compiler.AnotherTypeError(msg) -> msg
+    compiler.FileError(loc, err) ->
+      simplifile.describe_error(err) <> " @ " <> loc
+    compiler.CircularDependencyError -> "Circular dependency detected"
+    _ -> {
+      pprint.debug(err)
+      "Unmapped compiler error -- fix compiler_snag!"
+    }
+  }
 }
 
 /// Type for mapping to WASM -- stripped generics
@@ -61,14 +78,12 @@ type TypeRegistry =
 pub fn compile_module(
   project: project.Project,
   module: analysis.ModuleInternals,
-) {
+) -> Result(String, Snag) {
   let mb = wasm.create_module_builder(Some(module.location.module_path))
 
   use mb <- result.try(
     prelude.add_prelude_types(mb)
-    |> result.replace_error(compiler.AnotherTypeError(
-      "Failed to add prelude types",
-    )),
+    |> result.map_error(snag.new),
   )
 
   let types =
@@ -130,7 +145,7 @@ fn register_func_types(
   mb: wasm.ModuleBuilder,
   registry: TypeRegistry,
   func: analysis.Function,
-) -> Result(#(wasm.ModuleBuilder, TypeRegistry), compiler.CompilerError) {
+) -> Result(#(wasm.ModuleBuilder, TypeRegistry), Snag) {
   let projected_type = project_type(analysis.signature_type(func.signature))
   register_type(mb, registry, projected_type)
   |> result.map(fn(triple) {
@@ -143,10 +158,7 @@ fn register_type(
   mb: wasm.ModuleBuilder,
   registry: TypeRegistry,
   t: ProjectedType,
-) -> Result(
-  #(wasm.ModuleBuilder, TypeRegistry, Option(Int)),
-  compiler.CompilerError,
-) {
+) -> Result(#(wasm.ModuleBuilder, TypeRegistry, Option(Int)), Snag) {
   use _ <- result.try_recover(
     dict.get(registry, t)
     |> result.map(fn(i) { #(mb, registry, Some(i)) }),
@@ -182,7 +194,7 @@ fn register_type(
           let registry = dict.insert(registry, t, i)
           #(mb, registry, Some(i))
         })
-        |> result.map_error(compiler.AnotherTypeError)
+        |> result.map_error(snag.new)
       })
     HoleType -> Ok(#(mb, registry, None))
     TypeId(_) -> todo
@@ -193,7 +205,7 @@ pub fn output_module(
   project: project.Project,
   module_id: project.ModuleId,
   mb: wasm.ModuleBuilder,
-) -> Result(String, compiler.CompilerError) {
+) -> Result(String, Snag) {
   let wasm_file_name =
     filepath.join(
       project.package_build_path(project, module_id.package_name),
@@ -203,13 +215,14 @@ pub fn output_module(
   let wasm_dir_name = filepath.directory_name(wasm_file_name)
   use _ <- result.try(
     simplifile.create_directory_all(wasm_dir_name)
-    |> result.map_error(compiler.FileError(wasm_dir_name, _)),
+    |> snag.map_error(simplifile.describe_error)
+    |> snag.context("Creating directory " <> wasm_dir_name),
   )
 
   // TODO: properly return errors
   wasm.emit_module(mb, file_output_stream(wasm_file_name))
   |> pprint.debug
-  |> result.replace_error(compiler.AnotherTypeError("Hmm"))
+  |> result.replace_error(snag.new("Hmm"))
 }
 
 fn project_type(t: analysis.Type) -> ProjectedType {
@@ -236,11 +249,11 @@ fn compile_function(
   functions: Dict(String, Int),
   _internals: analysis.ModuleInternals,
   function: analysis.Function,
-) -> Result(wasm.ModuleBuilder, compiler.CompilerError) {
+) -> Result(wasm.ModuleBuilder, Snag) {
   let projected_type = project_type(analysis.signature_type(function.signature))
   use type_index <- result.try(
     dict.get(registry, projected_type)
-    |> result.replace_error(compiler.AnotherTypeError("Function type lost?")),
+    |> result.replace_error(snag.new("Function type lost?")),
   )
   io.println(
     "Create function "
@@ -264,7 +277,7 @@ fn compile_function(
         ),
       ),
     )
-    |> result.map_error(compiler.AnotherTypeError),
+    |> result.map_error(snag.new),
   )
   io.debug("We're doing a function..." <> function.signature.name)
   let state =
@@ -281,7 +294,7 @@ fn compile_function(
   use state <- result.try(add_instruction(state, wasm.End))
   let res =
     wasm.finalize_function(mb, state.builder)
-    |> result.map_error(compiler.AnotherTypeError)
+    |> result.map_error(snag.new)
   io.debug("Ended function")
   res
 }
@@ -305,7 +318,7 @@ fn with_params(
 fn compile_statement(
   state: LocalState,
   stmt: analysis.Statement,
-) -> Result(LocalState, compiler.CompilerError) {
+) -> Result(LocalState, Snag) {
   io.debug("-- Compile statement")
   let res = case stmt {
     analysis.Assignment(
@@ -328,10 +341,10 @@ fn add_local(
   state: LocalState,
   local_type: analysis.Type,
   local_name: Option(String),
-) -> Result(#(LocalState, Int), compiler.CompilerError) {
+) -> Result(#(LocalState, Int), Snag) {
   use local_type <- result.try(ref_type(state, local_type))
   wasm.add_local(state.builder, wasm.Ref(local_type), local_name)
-  |> result.map_error(compiler.AnotherTypeError)
+  |> result.map_error(snag.new)
   |> result.map(fn(res) {
     let #(builder, index) = res
     #(
@@ -344,16 +357,13 @@ fn add_local(
   })
 }
 
-fn ref_type(
-  state: LocalState,
-  t: analysis.Type,
-) -> Result(wasm.RefType, compiler.CompilerError) {
+fn ref_type(state: LocalState, t: analysis.Type) -> Result(wasm.RefType, Snag) {
   let projected_type = project_type(t)
   case projected_type {
     HoleType -> Ok(wasm.NonNull(wasm.AbstractAny))
     _ -> {
       dict.get(state.registry, projected_type)
-      |> result.replace_error(compiler.AnotherTypeError("Type lost?"))
+      |> result.replace_error(snag.new("Type lost?"))
       |> result.map(fn(type_index) {
         wasm.NonNull(wasm.ConcreteType(type_index))
       })
@@ -361,22 +371,19 @@ fn ref_type(
   }
 }
 
-fn get_type_index(
-  state: LocalState,
-  t: analysis.Type,
-) -> Result(Int, compiler.CompilerError) {
+fn get_type_index(state: LocalState, t: analysis.Type) -> Result(Int, Snag) {
   let projected_type = project_type(t)
   dict.get(state.registry, projected_type)
-  |> result.replace_error(compiler.AnotherTypeError("Type lost?"))
+  |> result.replace_error(snag.new("Type lost?"))
 }
 
 fn add_instruction(
   state: LocalState,
   instr: wasm.Instruction,
-) -> Result(LocalState, compiler.CompilerError) {
+) -> Result(LocalState, Snag) {
   use builder <- result.map(
     wasm.add_instruction(state.builder, instr)
-    |> result.map_error(compiler.AnotherTypeError),
+    |> result.map_error(snag.new),
   )
   LocalState(..state, builder:)
 }
@@ -384,7 +391,7 @@ fn add_instruction(
 fn compile_expression(
   state: LocalState,
   expr: analysis.Expression,
-) -> Result(LocalState, compiler.CompilerError) {
+) -> Result(LocalState, Snag) {
   case expr {
     analysis.Call(analysis.Fn(_, [], block), []) -> {
       io.debug("Compiling block")
@@ -491,7 +498,7 @@ fn compile_expression(
         int.parse(value)
         |> result.replace_error("Not a valid Int: " <> value)
         |> result.try(wasm.int64_signed)
-        |> result.map_error(compiler.AnotherTypeError),
+        |> result.map_error(snag.new),
       )
       list.try_fold(
         over: [wasm.I64Const(value), wasm.StructNew(prelude.int_index)],
@@ -508,31 +515,21 @@ fn compile_expression(
   }
 }
 
-fn get_local_index(
-  state: LocalState,
-  name: String,
-) -> Result(Int, compiler.CompilerError) {
+fn get_local_index(state: LocalState, name: String) -> Result(Int, Snag) {
   dict.get(state.locals, name)
-  |> result.replace_error(compiler.AnotherTypeError(
-    "Could not find local " <> name,
-  ))
+  |> result.replace_error(snag.new("Could not find local " <> name))
 }
 
-fn get_function_index(
-  state: LocalState,
-  name: String,
-) -> Result(Int, compiler.CompilerError) {
+fn get_function_index(state: LocalState, name: String) -> Result(Int, Snag) {
   dict.get(state.functions, name)
-  |> result.replace_error(compiler.AnotherTypeError(
-    "Could not find function " <> name,
-  ))
+  |> result.replace_error(snag.new("Could not find function " <> name))
 }
 
 fn compile_clause(
   state: LocalState,
   subjects: List(Int),
   clause: analysis.Clause,
-) -> Result(LocalState, compiler.CompilerError) {
+) -> Result(LocalState, Snag) {
   let analysis.Clause(patterns:, variables:, guard:, body:) = clause
   // mint locals for the variables
   let previous_locals = state.locals
@@ -607,7 +604,7 @@ fn compile_case_patterns(
   state: LocalState,
   subjects: List(Int),
   patterns: List(analysis.Pattern),
-) -> Result(LocalState, compiler.CompilerError) {
+) -> Result(LocalState, Snag) {
   list.zip(subjects, patterns)
   |> list.try_fold(from: state, with: fn(state, pair) {
     let #(subject, pattern) = pair
@@ -622,7 +619,7 @@ fn compile_case_patterns(
 fn compile_pattern(
   state: LocalState,
   pattern: analysis.Pattern,
-) -> Result(LocalState, compiler.CompilerError) {
+) -> Result(LocalState, Snag) {
   let assert Ok(zero) = wasm.int32_unsigned(0)
   let assert Ok(one) = wasm.int32_unsigned(1)
   case pattern {
@@ -697,7 +694,7 @@ fn compile_pattern(
     analysis.PatternVariable(name) -> {
       use index <- result.try(
         dict.get(state.locals, name)
-        |> result.replace_error(compiler.AnotherTypeError(
+        |> result.replace_error(snag.new(
           "Local for variable " <> name <> " not defined",
         )),
       )
@@ -731,7 +728,7 @@ fn type_of_expression(expr: analysis.Expression) -> analysis.Type {
 fn compile_expression_unboxed(
   state: LocalState,
   expr: analysis.Expression,
-) -> Result(LocalState, compiler.CompilerError) {
+) -> Result(LocalState, Snag) {
   // TODO: need to check which type we have
   use state <- result.try(compile_expression(state, expr))
   add_instruction(state, wasm.StructGet(prelude.int_index, 0))
@@ -778,7 +775,7 @@ fn with_builder(state: LocalState, builder: wasm.CodeBuilder) -> LocalState {
 fn compile_builtin(
   state: LocalState,
   builtin: analysis.BuiltInFunction,
-) -> Result(LocalState, compiler.CompilerError) {
+) -> Result(LocalState, Snag) {
   let assert Ok(zero) = wasm.int32_signed(0)
   let assert Ok(one) = wasm.int32_signed(1)
   case builtin {
