@@ -125,7 +125,7 @@ pub type Type {
   TypeVariable(name: String)
 }
 
-fn flatten_params(signature: FunctionSignature) -> List(Type) {
+pub fn flatten_params(signature: FunctionSignature) -> List(Type) {
   let FunctionSignature(_name, pos, lab, _ret) = signature
   list.append(pos, list.map(lab, fn(l) { l.item }))
 }
