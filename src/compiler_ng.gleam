@@ -5,7 +5,6 @@ import gl_wasm/wasm
 import glance
 import gleam/dict.{type Dict}
 import gleam/int
-import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/pair
@@ -88,14 +87,20 @@ pub fn compile_module(
 
   let types =
     dict.from_list([
-      #(TypeId(analysis.BuiltInType(analysis.IntType)), 0),
-      #(TypeId(analysis.BuiltInType(analysis.FloatType)), 1),
-      #(TypeId(analysis.BuiltInType(analysis.BoolType)), 2),
-      #(TypeId(analysis.BuiltInType(analysis.NilType)), 3),
-      #(TypeId(analysis.BuiltInType(analysis.ListType)), 4),
-      #(TypeId(analysis.BuiltInType(analysis.StringType)), 6),
-      #(TypeId(analysis.BuiltInType(analysis.BitArrayType)), 7),
-      #(TypeId(analysis.TypeFromModule(analysis.gleam_module_id, "Result")), 8),
+      #(TypeId(analysis.BuiltInType(analysis.IntType)), prelude.int_index),
+      #(TypeId(analysis.BuiltInType(analysis.FloatType)), prelude.float_index),
+      #(TypeId(analysis.BuiltInType(analysis.BoolType)), prelude.bool_index),
+      #(TypeId(analysis.BuiltInType(analysis.NilType)), prelude.nil_index),
+      #(TypeId(analysis.BuiltInType(analysis.ListType)), prelude.list_index),
+      #(TypeId(analysis.BuiltInType(analysis.StringType)), prelude.string_index),
+      #(
+        TypeId(analysis.BuiltInType(analysis.BitArrayType)),
+        prelude.bit_array_index,
+      ),
+      #(
+        TypeId(analysis.TypeFromModule(analysis.gleam_module_id, "Result")),
+        prelude.result_index,
+      ),
     ])
 
   // Generate types
@@ -110,8 +115,6 @@ pub fn compile_module(
       },
     ),
   )
-
-  pprint.debug(types)
 
   // TODO: generate imports
 
@@ -132,6 +135,7 @@ pub fn compile_module(
       from: mb,
       with: fn(mb, func) {
         compile_function(mb, types, functions, module, func)
+        |> snag.context("Compiling function: " <> func.signature.name)
       },
     ),
   )
@@ -255,12 +259,6 @@ fn compile_function(
     dict.get(registry, projected_type)
     |> result.replace_error(snag.new("Function type lost?")),
   )
-  io.println(
-    "Create function "
-    <> function.signature.name
-    <> " of type "
-    <> int.to_string(type_index),
-  )
   use #(mb, fb) <- result.try(
     wasm.create_function_builder(
       mb,
@@ -279,7 +277,6 @@ fn compile_function(
     )
     |> result.map_error(snag.new),
   )
-  io.debug("We're doing a function..." <> function.signature.name)
   let state =
     with_params(
       LocalState(fb, registry, functions, dict.new()),
@@ -289,14 +286,12 @@ fn compile_function(
     analysis.External(_, _) -> todo
     analysis.GleamBody(statements) ->
       list.try_fold(over: statements, from: state, with: compile_statement)
+      |> snag.context("Compiling body statements")
   })
-  io.debug("Going to end function " <> function.signature.name)
   use state <- result.try(add_instruction(state, wasm.End))
-  let res =
-    wasm.finalize_function(mb, state.builder)
-    |> result.map_error(snag.new)
-  io.debug("Ended function")
-  res
+  wasm.finalize_function(mb, state.builder)
+  |> result.map_error(snag.new)
+  |> snag.context("Finalizing function")
 }
 
 fn with_params(
@@ -319,21 +314,25 @@ fn compile_statement(
   state: LocalState,
   stmt: analysis.Statement,
 ) -> Result(LocalState, Snag) {
-  io.debug("-- Compile statement")
   let res = case stmt {
     analysis.Assignment(
       glance.Let,
       analysis.PatternWithVariables(pattern, variables),
       value,
     ) -> {
-      use state <- result.try(compile_expression(state, value))
-      use state <- result.try(create_variables(state, variables))
-      compile_pattern(state, pattern)
+      use state <- result.try(
+        compile_expression(state, value)
+        |> snag.context("Let: compiling value expression"),
+      )
+      use state <- result.try(
+        create_variables(state, variables)
+        |> snag.context("Let: creating variables"),
+      )
+      compile_pattern(state, pattern) |> snag.context("Let: compiling pattern")
     }
     analysis.Assignment(_, _, _) -> todo
     analysis.Expression(expr) -> compile_expression(state, expr)
   }
-  io.debug("-- Compiled statement")
   res
 }
 
@@ -394,43 +393,49 @@ fn compile_expression(
 ) -> Result(LocalState, Snag) {
   case expr {
     analysis.Call(analysis.Fn(_, [], block), []) -> {
-      io.debug("Compiling block")
       let previous_locals = state.locals
-      use state <- result.map(list.try_fold(
-        over: block,
-        from: state,
-        with: compile_statement,
-      ))
-      io.debug("Compiled block")
+      use state <- result.map(
+        list.try_fold(over: block, from: state, with: compile_statement)
+        |> snag.context("Block"),
+      )
       LocalState(..state, locals: previous_locals)
     }
     analysis.Call(fun, args) -> {
-      io.debug("Compiling call")
       use state <- result.try(
         list.try_fold(over: args, from: state, with: case unbox_args(fun) {
           False -> compile_expression
           True -> compile_expression_unboxed
-        }),
+        })
+        |> snag.context("Call: compiling arguments for the function call"),
       )
-      let res = case fun {
+      case fun {
         analysis.FunctionReference(_, analysis.BuiltInFunction(builtin)) ->
           compile_builtin(state, builtin)
+          |> snag.context("Call: compiling the builtin")
         analysis.FunctionReference(_, analysis.FunctionFromModule(_, name)) -> {
           // TODO: imported functions
-          use index <- result.try(get_function_index(state, name))
-          io.debug("Going to call a function")
-          let res = add_instruction(state, wasm.Call(index))
-          io.debug("Got here")
-          res
+          use index <- result.try(
+            get_function_index(state, name)
+            |> snag.context("Call: getting the called function"),
+          )
+          add_instruction(state, wasm.Call(index))
+          |> snag.context("Call: executing the function call (top-level)")
         }
         analysis.Variable(fn_type, name) -> {
-          use local_index <- result.try(get_local_index(state, name))
-          use type_index <- result.try(get_type_index(state, fn_type))
-          use state <- result.try(add_instruction(
-            state,
-            wasm.LocalGet(local_index),
-          ))
+          use local_index <- result.try(
+            get_local_index(state, name)
+            |> snag.context("Call: getting the called variable"),
+          )
+          use type_index <- result.try(
+            get_type_index(state, fn_type)
+            |> snag.context("Call: getting the called function type"),
+          )
+          use state <- result.try(
+            add_instruction(state, wasm.LocalGet(local_index))
+            |> snag.context("Call: getting the called local"),
+          )
           add_instruction(state, wasm.CallRef(type_index))
+          |> snag.context("Call: executing the function call (by ref)")
         }
         _ -> {
           use state <- result.try(compile_expression(state, fun))
@@ -438,12 +443,9 @@ fn compile_expression(
           todo
         }
       }
-      io.debug("Compiled call")
-      res
     }
     analysis.Case(typ:, subjects:, clauses:) -> {
       // allocate locals for the subjects
-      io.debug("Compiling case")
       use #(state, indices) <- result.try(
         analysis.try_map_fold(
           over: subjects,
@@ -451,7 +453,8 @@ fn compile_expression(
           with: fn(state, subj) {
             add_local(state, type_of_expression(subj), None)
           },
-        ),
+        )
+        |> snag.context("Case: allocating locals for subjects"),
       )
       use state <- result.try(
         list.try_fold(
@@ -462,25 +465,31 @@ fn compile_expression(
             use state <- result.try(compile_expression(state, subj))
             add_instruction(state, wasm.LocalSet(index))
           },
-        ),
+        )
+        |> snag.context("Case: initializing subjects"),
       )
-      use block_type <- result.try(ref_type(state, typ))
-      use state <- result.try(add_instruction(
-        state,
-        wasm.Block(wasm.BlockValue(wasm.Ref(block_type))),
-      ))
+      use block_type <- result.try(
+        ref_type(state, typ) |> snag.context("Case: getting result type"),
+      )
+      use state <- result.try(
+        add_instruction(
+          state,
+          wasm.Block(wasm.BlockValue(wasm.Ref(block_type))),
+        )
+        |> snag.context("Case: opening outer block"),
+      )
       use state <- result.try(
         list.try_fold(over: clauses, from: state, with: fn(state, clause) {
           compile_clause(state, indices, clause)
-        }),
+        })
+        |> snag.context("Case: compiling clauses"),
       )
-      use state <- result.try(list.try_fold(
+      list.try_fold(
         over: [wasm.Unreachable, wasm.End],
         from: state,
         with: add_instruction,
-      ))
-      io.debug("Compiled case")
-      Ok(state)
+      )
+      |> snag.context("Case: closing outer block")
     }
     analysis.Float(_) -> todo
     analysis.Fn(_, _, _) -> {
@@ -489,8 +498,12 @@ fn compile_expression(
     }
     analysis.FunctionReference(_, analysis.FunctionFromModule(_, name)) -> {
       // TODO: imported functions!
-      use index <- result.try(get_function_index(state, name))
+      use index <- result.try(
+        get_function_index(state, name)
+        |> snag.context("FunctionReference: getting referenced index"),
+      )
       add_instruction(state, wasm.RefFunc(index))
+      |> snag.context("FunctionReference: referencing func")
     }
     analysis.FunctionReference(_, analysis.BuiltInFunction(_)) -> todo
     analysis.Int(value) -> {
@@ -560,31 +573,27 @@ fn compile_clause(
   use state <- result.try(add_instruction(state, wasm.End))
 
   // clause guard expression
-  io.debug("guard")
-  use state <- result.try(compile_expression(state, guard))
+  use state <- result.try(
+    compile_expression(state, guard) |> snag.context("Clause: guard expression"),
+  )
   // if guard == false, break out of the clause
-  io.debug("it was the bool!")
   use state <- result.try(add_instruction(
     state,
     wasm.StructGet(prelude.bool_index, 0),
   ))
-  io.debug("it was the bool!")
   use state <- result.try(add_instruction(state, wasm.I32EqZ))
   use state <- result.try(add_instruction(state, wasm.BreakIf(0)))
 
   // body expression
-  io.debug("body")
-  use state <- result.try(compile_expression(state, body))
-  pprint.debug(state.builder)
+  use state <- result.try(
+    compile_expression(state, body) |> snag.context("Clause: compiling body"),
+  )
   // break out of the clause returning the result
-  io.debug("/body")
   use state <- result.try(add_instruction(state, wasm.Break(1)))
 
   // close clause block
-  io.debug("end block")
   use state <- result.try(add_instruction(state, wasm.Unreachable))
   use state <- result.try(add_instruction(state, wasm.End))
-  io.debug("/clause")
   Ok(LocalState(..state, locals: previous_locals))
 }
 
