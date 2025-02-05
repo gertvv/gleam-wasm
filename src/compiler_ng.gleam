@@ -392,7 +392,7 @@ fn compile_expression(
   expr: analysis.Expression,
 ) -> Result(LocalState, Snag) {
   case expr {
-    analysis.Call(analysis.Fn(_, [], block), []) -> {
+    analysis.Block(body: block, ..) -> {
       let previous_locals = state.locals
       use state <- result.map(
         list.try_fold(over: block, from: state, with: compile_statement)
@@ -492,7 +492,7 @@ fn compile_expression(
       |> snag.context("Case: closing outer block")
     }
     analysis.Float(_) -> todo
-    analysis.Fn(_, _, _) -> {
+    analysis.Fn(_, _, _, _) -> {
       pprint.debug(expr)
       todo
     }
@@ -565,7 +565,8 @@ fn compile_clause(
       use state <- result.try(add_instruction(state, wasm.Break(1)))
       // close pattern block
       add_instruction(state, wasm.End)
-    }),
+    })
+    |> snag.context("Clause: compile alternative patterns"),
   )
   // none of the alternative patterns matched; break out of the clause
   use state <- result.try(add_instruction(state, wasm.Break(1)))
@@ -727,7 +728,8 @@ fn type_of_expression(expr: analysis.Expression) -> analysis.Type {
     | analysis.Fn(typ:, ..)
     | analysis.FunctionReference(typ:, ..)
     | analysis.Trap(typ:, ..)
-    | analysis.Variable(typ:, ..) -> typ
+    | analysis.Variable(typ:, ..)
+    | analysis.Block(typ:, ..) -> typ
     analysis.Float(_) -> analysis.float_type
     analysis.Int(_) -> analysis.int_type
     analysis.String(_) -> analysis.string_type

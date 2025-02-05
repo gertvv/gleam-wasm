@@ -8,6 +8,7 @@ import gleam/pair
 import gleam/result
 import gleam/set
 import gleeunit/should
+import pprint
 import project
 
 fn empty_module_internals(package_name, module_path) {
@@ -530,6 +531,7 @@ pub fn type_infer_function_test() {
           ],
         )),
       ],
+      captures: [],
     )
 
   let constraints = [
@@ -582,6 +584,7 @@ pub fn type_infer_function_test() {
           ],
         )),
       ],
+      captures: [],
     )
 
   let #(context, type_var) =
@@ -657,6 +660,7 @@ pub fn type_infer_function_using_import_test() {
           ),
         ),
       ],
+      captures: [],
     )
 
   let constraints = [
@@ -706,6 +710,7 @@ pub fn type_infer_function_using_import_test() {
           ),
         ),
       ],
+      captures: [],
     )
 
   let internals =
@@ -748,9 +753,12 @@ pub fn type_infer_function_with_return_annotation_test() {
   |> result.map(pair.second)
   |> should.equal(
     Ok(
-      analysis.Fn(analysis.FunctionType([], analysis.int_type), [], [
-        analysis.Expression(analysis.Int("42")),
-      ]),
+      analysis.Fn(
+        typ: analysis.FunctionType([], analysis.int_type),
+        argument_names: [],
+        body: [analysis.Expression(analysis.Int("42"))],
+        captures: [],
+      ),
     ),
   )
 
@@ -772,9 +780,12 @@ pub fn type_infer_function_with_return_annotation_test() {
   |> result.map(pair.second)
   |> should.equal(
     Ok(
-      analysis.Fn(analysis.FunctionType([], analysis.int_type), [], [
-        analysis.Expression(analysis.Int("42")),
-      ]),
+      analysis.Fn(
+        typ: analysis.FunctionType([], analysis.int_type),
+        argument_names: [],
+        body: [analysis.Expression(analysis.Int("42"))],
+        captures: [],
+      ),
     ),
   )
 
@@ -829,9 +840,9 @@ pub fn type_infer_function_with_return_annotation_test() {
   |> should.equal(
     Ok(
       analysis.Fn(
-        analysis.FunctionType([type_var], option_with_type_var),
-        [glance.Named("x")],
-        [
+        typ: analysis.FunctionType([type_var], option_with_type_var),
+        argument_names: [glance.Named("x")],
+        body: [
           analysis.Expression(
             analysis.Call(
               analysis.FunctionReference(
@@ -842,6 +853,7 @@ pub fn type_infer_function_with_return_annotation_test() {
             ),
           ),
         ],
+        captures: [],
       ),
     ),
   )
@@ -860,20 +872,17 @@ pub fn type_infer_block_test() {
   |> analysis.infer(empty_module_internals("foo", "bar"))
   |> should.equal(
     Ok(
-      analysis.Call(
-        analysis.Fn(analysis.FunctionType([], analysis.int_type), [], [
-          analysis.Assignment(
-            glance.Let,
-            analysis.PatternWithVariables(
-              analysis.PatternVariable("x"),
-              dict.from_list([#("x", analysis.int_type)]),
-            ),
-            analysis.Int("42"),
+      analysis.Block(analysis.int_type, [
+        analysis.Assignment(
+          glance.Let,
+          analysis.PatternWithVariables(
+            analysis.PatternVariable("x"),
+            dict.from_list([#("x", analysis.int_type)]),
           ),
-          analysis.Expression(analysis.Variable(analysis.int_type, "x")),
-        ]),
-        [],
-      ),
+          analysis.Int("42"),
+        ),
+        analysis.Expression(analysis.Variable(analysis.int_type, "x")),
+      ]),
     ),
   )
 }
@@ -992,35 +1001,32 @@ pub fn type_infer_let_pattern_test() {
   |> analysis.infer(empty_module_internals("foo", "bar"))
   |> should.equal(
     Ok(
-      analysis.Call(
-        analysis.Fn(analysis.FunctionType([], analysis.float_type), [], [
-          analysis.Assignment(
-            glance.Let,
-            analysis.PatternWithVariables(
-              analysis.PatternTuple([
-                analysis.PatternDiscard(""),
-                analysis.PatternVariable("y"),
-              ]),
-              dict.from_list([#("y", analysis.float_type)]),
-            ),
-            analysis.Call(
-              analysis.FunctionReference(
-                analysis.FunctionType(
-                  [analysis.int_type, analysis.float_type],
-                  analysis.TypeConstructor(
-                    analysis.BuiltInType(analysis.TupleType(2)),
-                    [analysis.int_type, analysis.float_type],
-                  ),
-                ),
-                analysis.BuiltInFunction(analysis.TupleConstructor(2)),
-              ),
-              [analysis.Int("42"), analysis.Float("3.14")],
-            ),
+      analysis.Block(analysis.float_type, [
+        analysis.Assignment(
+          glance.Let,
+          analysis.PatternWithVariables(
+            analysis.PatternTuple([
+              analysis.PatternDiscard(""),
+              analysis.PatternVariable("y"),
+            ]),
+            dict.from_list([#("y", analysis.float_type)]),
           ),
-          analysis.Expression(analysis.Variable(analysis.float_type, "y")),
-        ]),
-        [],
-      ),
+          analysis.Call(
+            analysis.FunctionReference(
+              analysis.FunctionType(
+                [analysis.int_type, analysis.float_type],
+                analysis.TypeConstructor(
+                  analysis.BuiltInType(analysis.TupleType(2)),
+                  [analysis.int_type, analysis.float_type],
+                ),
+              ),
+              analysis.BuiltInFunction(analysis.TupleConstructor(2)),
+            ),
+            [analysis.Int("42"), analysis.Float("3.14")],
+          ),
+        ),
+        analysis.Expression(analysis.Variable(analysis.float_type, "y")),
+      ]),
     ),
   )
   // TODO: let assert scenario with Result
@@ -1308,30 +1314,25 @@ pub fn type_infer_field_access_test() {
   |> analysis.infer(internals)
   |> should.equal(
     Ok(
-      analysis.Call(
-        analysis.Fn(analysis.FunctionType([], my_type), [], [
-          analysis.Assignment(
-            glance.Let,
-            analysis.PatternWithVariables(
-              analysis.PatternVariable("record"),
-              dict.from_list([#("record", my_type)]),
-            ),
-            analysis.Call(variant_b_constructor, [
-              analysis.Int("42"),
-              analysis.Float("3.14"),
-            ]),
+      analysis.Block(my_type, [
+        analysis.Assignment(
+          glance.Let,
+          analysis.PatternWithVariables(
+            analysis.PatternVariable("record"),
+            dict.from_list([#("record", my_type)]),
           ),
-          analysis.Expression(
-            analysis.Call(variant_b_constructor, [
-              analysis.Call(access_field_a, [
-                analysis.Variable(my_type, "record"),
-              ]),
-              analysis.Float("2.71"),
-            ]),
-          ),
-        ]),
-        [],
-      ),
+          analysis.Call(variant_b_constructor, [
+            analysis.Int("42"),
+            analysis.Float("3.14"),
+          ]),
+        ),
+        analysis.Expression(
+          analysis.Call(variant_b_constructor, [
+            analysis.Call(access_field_a, [analysis.Variable(my_type, "record")]),
+            analysis.Float("2.71"),
+          ]),
+        ),
+      ]),
     ),
   )
 }
@@ -1572,15 +1573,20 @@ pub fn fn_capture_test() {
 
   expr
   |> should.equal(
-    analysis.Fn(analysis.TypeVariable("$1"), [glance.Named("$1")], [
-      analysis.Expression(
-        analysis.Call(analysis.Variable(analysis.TypeVariable("a"), "fun"), [
-          analysis.Variable(analysis.int_type, "x"),
-          analysis.Variable(analysis.TypeVariable("$2"), "$1"),
-          analysis.Variable(analysis.int_type, "y"),
-        ]),
-      ),
-    ]),
+    analysis.Fn(
+      typ: analysis.TypeVariable("$1"),
+      argument_names: [glance.Named("$1")],
+      body: [
+        analysis.Expression(
+          analysis.Call(analysis.Variable(analysis.TypeVariable("a"), "fun"), [
+            analysis.Variable(analysis.int_type, "x"),
+            analysis.Variable(analysis.TypeVariable("$2"), "$1"),
+            analysis.Variable(analysis.int_type, "y"),
+          ]),
+        ),
+      ],
+      captures: [],
+    ),
   )
 
   context.constraints
@@ -1718,12 +1724,12 @@ pub fn infer_use_test() {
                 [],
               ),
               analysis.Fn(
-                analysis.FunctionType(
+                typ: analysis.FunctionType(
                   [analysis.list_type(var_a), var_a],
                   analysis.list_type(var_a),
                 ),
-                [glance.Named("acc"), glance.Named("item")],
-                [
+                argument_names: [glance.Named("acc"), glance.Named("item")],
+                body: [
                   analysis.Expression(
                     analysis.Call(
                       analysis.FunctionReference(
@@ -1742,6 +1748,7 @@ pub fn infer_use_test() {
                     ),
                   ),
                 ],
+                captures: [],
               ),
             ],
           ),
@@ -1760,6 +1767,38 @@ pub fn infer_use_test() {
   weird_reverse(None, Some("from"))
   |> analysis.infer_function(internals, _)
   |> should.equal(Ok(weird_reverse_typed))
+}
+
+pub fn infer_closure_test() {
+  let parsed_closure =
+    glance.Fn([glance.FnParameter(glance.Named("y"), None)], None, [
+      glance.Expression(glance.BinaryOperator(
+        glance.MultInt,
+        glance.Variable("x"),
+        glance.Variable("y"),
+      )),
+    ])
+  let context =
+    analysis.Context(
+      internals: empty_module_internals("foo", "bar"),
+      substitution: dict.from_list([
+        #("$1", analysis.TypeVariable("$1")),
+        #("$2", analysis.TypeVariable("$2")),
+      ]),
+      constraints: [],
+      next_variable: 3,
+      next_generated_name: 1,
+      locals: set.new(),
+      captures: [],
+    )
+  let assert Ok(#(_, analysis.Fn(captures:, ..))) =
+    analysis.init_inference(
+      parsed_closure,
+      analysis.TypeVariable("$2"),
+      dict.from_list([#("x", analysis.TypeVariable("$1"))]),
+      context,
+    )
+  captures |> should.equal([#("x", analysis.TypeVariable("$1"))])
 }
 
 pub fn infer_function_test() {

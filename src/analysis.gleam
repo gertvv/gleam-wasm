@@ -200,6 +200,7 @@ pub type Expression {
   Int(val: String)
   Float(val: String)
   String(val: String)
+  Block(typ: Type, body: List(Statement))
   Variable(typ: Type, name: String)
   Trap(typ: Type, kind: TrapKind, detail: Option(Expression))
   FunctionReference(typ: Type, id: FunctionId)
@@ -207,6 +208,7 @@ pub type Expression {
     typ: Type,
     argument_names: List(glance.AssignmentName),
     body: List(Statement),
+    captures: List(#(String, Type)),
   )
   // TODO: consider storing a Type on Call otherwise it may be a pain
   Call(function: Expression, arguments: List(Expression))
@@ -270,6 +272,8 @@ pub type Context {
     constraints: List(Constraint),
     next_variable: Int,
     next_generated_name: Int,
+    locals: Set(String),
+    captures: List(#(String, Type)),
   )
 }
 
@@ -280,7 +284,34 @@ pub fn new_context(internals: ModuleInternals) -> Context {
     constraints: [],
     next_variable: 1,
     next_generated_name: 1,
+    locals: set.new(),
+    captures: [],
   )
+}
+
+fn context_new_fn(context: Context) -> Context {
+  Context(..context, locals: set.new(), captures: [])
+}
+
+fn context_restore(context: Context, old: Context) -> Context {
+  Context(..context, locals: old.locals, captures: old.captures)
+}
+
+fn context_let_var(context: Context, name: String) -> Context {
+  Context(..context, locals: set.insert(context.locals, name))
+}
+
+fn context_let_vars(context: Context, vars: List(String)) -> Context {
+  list.fold(over: vars, from: context, with: fn(context, var) {
+    context_let_var(context, var)
+  })
+}
+
+fn context_ref_var(context: Context, name: String, t: Type) -> Context {
+  case set.contains(context.locals, name) {
+    True -> context
+    False -> Context(..context, captures: [#(name, t), ..context.captures])
+  }
 }
 
 pub fn fresh_type_variable(context: Context) -> #(Context, Type) {
@@ -794,7 +825,7 @@ pub fn init_inference_statement(
       }
       #(
         rest,
-        context,
+        context_let_vars(context, dict.keys(pattern.variables)),
         dict.merge(environment, pattern.variables),
         Assignment(glance.Let, pattern, expr),
       )
@@ -1240,7 +1271,7 @@ fn init_inference_gleam_function(
     environment,
     context,
   ))
-  let assert Fn(FunctionType(param_types, return_type), _names, body) = fun
+  let assert Fn(typ: FunctionType(param_types, return_type), body:, ..) = fun
 
   let #(pos_param_types, label_param_types) =
     list.split(param_types, list.length(pos_params))
@@ -1392,7 +1423,8 @@ pub fn init_inference(
         lookup(environment, name)
         |> result.map(fn(variable_type) {
           #(
-            add_constraint(context, Equal(expected_type, variable_type)),
+            add_constraint(context, Equal(expected_type, variable_type))
+              |> context_ref_var(name, variable_type),
             Variable(variable_type, name),
           )
         }),
@@ -1428,7 +1460,7 @@ pub fn init_inference(
         environment,
         context,
       ))
-      #(context, Call(Fn(FunctionType([], expected_type), [], body), []))
+      #(context, Block(expected_type, body))
     }
     glance.Panic(maybe_expr) | glance.Todo(maybe_expr) -> {
       let construct = case expr {
@@ -1491,7 +1523,7 @@ pub fn init_inference(
       )
 
       // Populate environment with any named arguments
-      let environment =
+      let named_args =
         list.zip(args, param_types)
         |> list.filter(fn(p) {
           case p.0 {
@@ -1503,7 +1535,12 @@ pub fn init_inference(
           pair.map_first(_, fn(p) { assignment_name_to_string(p.name) }),
         )
         |> dict.from_list
-        |> dict.merge(environment, _)
+      let environment = dict.merge(environment, named_args)
+
+      // Start a new function context
+      let old_context = context
+      let context =
+        context_new_fn(context) |> context_let_vars(dict.keys(named_args))
 
       use #(context, body) <- result.map(init_inference_block(
         body,
@@ -1513,8 +1550,14 @@ pub fn init_inference(
       ))
       let fn_type = FunctionType(param_types, return_type)
       #(
-        add_constraint(context, Equal(expected_type, fn_type)),
-        Fn(fn_type, list.map(args, fn_param_to_arg_name), body),
+        add_constraint(context, Equal(expected_type, fn_type))
+          |> context_restore(old_context),
+        Fn(
+          fn_type,
+          list.map(args, fn_param_to_arg_name),
+          body,
+          context.captures,
+        ),
       )
     }
     glance.RecordUpdate(maybe_module, constructor_name, record, fields) -> {
@@ -1654,7 +1697,7 @@ pub fn init_inference(
         let fn_type = FunctionType([arg_type], return_type)
         #(
           add_constraint(context, Equal(expected_type, fn_type)),
-          Fn(expected_type, [arg_name], [Expression(expr)]),
+          Fn(expected_type, [arg_name], [Expression(expr)], []),
         )
       })
     }
@@ -1725,10 +1768,6 @@ pub fn get_sub(context: Context, t: Type) -> Result(Type, Nil) {
       })
     _ -> Error(Nil)
   }
-}
-
-fn function_signature(f: Function) -> FunctionSignature {
-  f.signature
 }
 
 fn occurs_in(var: String, t: Type) -> Bool {
@@ -2086,11 +2125,17 @@ pub fn substitute_expression(
 ) -> Expression {
   case expr {
     Int(_) | Float(_) | String(_) -> expr
-    Fn(t, param_names, body) ->
+    Block(typ:, body:) ->
+      Block(
+        typ: substitute(typ, subs),
+        body: substitute_statement_list(body, subs),
+      )
+    Fn(typ:, argument_names:, body:, captures:) ->
       Fn(
-        substitute(t, subs),
-        param_names,
-        substitute_statement_list(body, subs),
+        typ: substitute(typ, subs),
+        argument_names:,
+        body: substitute_statement_list(body, subs),
+        captures:,
       )
     Variable(t, name) -> Variable(substitute(t, subs), name)
     Call(function, args) ->
@@ -2454,7 +2499,7 @@ fn referenced_types_expr(expr: Expression) -> List(TypeId) {
       ]
       |> list.flatten
     Float(_) -> [BuiltInType(FloatType)]
-    Fn(typ:, body:, ..) ->
+    Fn(typ:, body:, ..) | Block(typ:, body:) ->
       [referenced_types_type(typ), referenced_types_block(body)] |> list.flatten
     FunctionReference(typ:, ..) -> referenced_types_type(typ)
     Int(_) -> [BuiltInType(IntType)]
@@ -2516,7 +2561,7 @@ fn referenced_functions_expr(expr: Expression) -> List(FunctionId) {
         subjects |> list.flat_map(referenced_functions_expr),
         clauses |> list.flat_map(referenced_functions_clause),
       )
-    Fn(_type, _arg_names, body) -> referenced_functions_block(body)
+    Fn(body:, ..) | Block(body:, ..) -> referenced_functions_block(body)
     FunctionReference(_type, id) -> [id]
     Int(_) | Float(_) | String(_) | Trap(_, _, _) | Variable(_, _) -> []
   }
