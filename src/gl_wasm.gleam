@@ -5,7 +5,6 @@ import glance.{
   type Module, type Type,
 }
 import gleam/dict
-import gleam/io
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
@@ -191,5 +190,5 @@ pub fn main() {
     simplifile.write("generated.wat", code_str)
     |> result.map_error(compiler.FileError("generated.wat", _))
   })
-  |> io.debug
+  |> echo
 }

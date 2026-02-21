@@ -103,6 +103,9 @@ pub fn compile_module(
       ),
     ])
 
+  list.flatten(module.implemented_functions)
+  |> list.map(implicit_functions)
+
   // Generate types
   // TODO: types for anonymous functions
   use #(mb, types) <- result.try(
@@ -143,6 +146,58 @@ pub fn compile_module(
   // TODO: generate exports
 
   output_module(project, module.location, mb)
+}
+
+pub type ImplicitFunction {
+  FunctionAsClosure(analysis.FunctionId)
+  /// Wraps a function taking concrete arguments in a function taking generic arguments.
+  /// Some(_type) indicates the argument must be cast to a concrete type.
+  /// None indicates no casting is required
+  ConcreteArgsAsGeneric(
+    function: analysis.Expression,
+    map: List(Option(analysis.Type)),
+  )
+  AnonymousFunction(
+    typ: analysis.Type,
+    argument_names: List(glance.AssignmentName),
+    body: List(analysis.Statement),
+    captures: List(#(String, analysis.Type)),
+  )
+}
+
+pub fn implicit_functions(func: analysis.Function) {
+  case func.body {
+    analysis.External(_, _) -> []
+    analysis.GleamBody(body) -> implicit_functions_block(body)
+  }
+}
+
+fn implicit_functions_block(
+  block: List(analysis.Statement),
+) -> List(ImplicitFunction) {
+  list.flat_map(block, fn(stmt) {
+    case stmt {
+      analysis.Assignment(value: expr, ..) | analysis.Expression(expr) ->
+        implicit_functions_expr(expr)
+    }
+  })
+}
+
+fn implicit_functions_expr(expr: analysis.Expression) -> List(ImplicitFunction) {
+  case expr {
+    analysis.Block(body:, ..) -> implicit_functions_block(body)
+    analysis.Call(func, args) ->
+      list.flat_map([func, ..args], implicit_functions_expr)
+    analysis.Case(subjects:, clauses:, ..) ->
+      list.append(
+        list.flat_map(subjects, implicit_functions_expr),
+        list.map(clauses, fn(clause) { clause.body })
+          |> list.flat_map(implicit_functions_expr),
+      )
+    analysis.Fn(a, b, c, d) -> [AnonymousFunction(a, b, c, d)]
+    analysis.Trap(detail: Some(expr), ..) -> implicit_functions_expr(expr)
+    _ -> []
+  }
 }
 
 fn register_func_types(

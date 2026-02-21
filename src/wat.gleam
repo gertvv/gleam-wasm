@@ -1,5 +1,4 @@
 import gleam/int
-import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string_tree.{type StringTree, from_string as sb}
@@ -281,7 +280,7 @@ fn expression_to_string(expr: WatExpression, indent: StringTree) -> StringTree {
       sexpr("return", [expression_to_string(expr, indent)], indent, False)
     Unreachable -> sb("unreachable")
     _ -> {
-      io.debug(expr)
+      echo expr
       todo
     }
   }

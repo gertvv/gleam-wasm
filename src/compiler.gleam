@@ -4,8 +4,8 @@ import gleam/list
 import gleam/option.{None}
 import gleam/result
 import gleam/set.{type Set}
-import gloml
 import simplifile.{type FileError}
+import tom
 import wat.{
   type WatDefinition, type WatExpression, type WatFunctionType, type WatType,
 }
@@ -18,7 +18,7 @@ pub type ErrorLocation {
 
 pub type CompilerError {
   FileError(path: String, error: FileError)
-  PackageTomlError(error: gloml.DecodeError)
+  PackageTomlError(error: String)
   CircularDependencyError
   ParseError(error: glance.Error)
   SyntaxError(error: String)

@@ -3,16 +3,15 @@ import filepath
 import glance
 import gleam/dict.{type Dict}
 import gleam/dynamic
-import gleam/io
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/pair
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
-import gloml
 import pprint
 import simplifile
+import tom
 
 // TODO: make this project path agnostic
 
@@ -49,23 +48,19 @@ fn parse_gleam_toml(source_path: String) {
   simplifile.read(path)
   |> result.map_error(compiler.FileError(path, _))
   |> result.try(fn(str) {
-    gloml.decode(
-      str,
-      dynamic.decode2(
-        fn(name, deps) {
-          #(name, case deps {
-            Some(deps) -> dict.keys(deps)
-            None -> []
-          })
-        },
-        dynamic.field("name", dynamic.string),
-        dynamic.optional_field(
-          "dependencies",
-          dynamic.dict(dynamic.string, dynamic.string),
-        ),
-      ),
+    use toml <- result.try(
+      tom.parse(str)
+      |> result.replace_error(compiler.PackageTomlError("Parse failed " <> path)),
     )
-    |> result.map_error(compiler.PackageTomlError)
+    use name <- result.map(
+      tom.get_string(toml, ["name"])
+      |> result.replace_error(compiler.PackageTomlError("Name is missing")),
+    )
+    let deps =
+      tom.get_table(toml, ["dependencies"])
+      |> result.unwrap(dict.new())
+      |> dict.keys
+    #(name, deps)
   })
 }
 
@@ -158,8 +153,7 @@ pub fn scan_project(source_path: String, target: String) {
 }
 
 pub fn main() {
-  scan_project(".", "javascript")
-  |> io.debug
+  echo scan_project(".", "javascript")
 }
 
 pub fn package_build_path(project: Project, package_name: String) -> String {

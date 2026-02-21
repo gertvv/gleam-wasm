@@ -3,7 +3,6 @@ import glance.{type Clause, type Expression, type Statement, type Type}
 import gleam/dict.{type Dict}
 import gleam/float
 import gleam/int
-import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -127,7 +126,7 @@ pub fn type_compiler_hack(res) {
   case res {
     Ok(#(_, type_)) -> type_
     Error(e) -> {
-      io.debug(e)
+      echo e
       wat.Ref(wat.Direct(wat.Any))
     }
   }
@@ -174,7 +173,7 @@ fn wrap_primitive_function(
           ]),
         )
         code -> {
-          io.debug(code)
+          echo code
           todo
         }
       }
@@ -355,13 +354,11 @@ fn match_type(
                 act_type,
               ))
           }
-          |> result.try(list.try_fold(
-            _,
-            mapping,
-            fn(mapping, item: #(Type, Type)) {
+          |> result.try(
+            list.try_fold(_, mapping, fn(mapping, item: #(Type, Type)) {
               match_type(expr, item.0, item.1, mapping)
-            },
-          ))
+            }),
+          )
         }
         _ ->
           Error(compiler.TypeError(
@@ -390,13 +387,11 @@ fn match_type(
                 act_type,
               ))
           }
-          |> result.try(list.try_fold(
-            _,
-            mapping,
-            fn(mapping, item: #(Type, Type)) {
+          |> result.try(
+            list.try_fold(_, mapping, fn(mapping, item: #(Type, Type)) {
               match_type(expr, item.0, item.1, mapping)
-            },
-          ))
+            }),
+          )
         }
         _ ->
           Error(compiler.TypeError(
@@ -522,7 +517,7 @@ fn compile_pattern(
       )
     }
     _ -> {
-      io.debug(pattern)
+      echo pattern
       todo
     }
   }
@@ -785,7 +780,7 @@ pub fn compile_expression(
         }
       })
     _ -> {
-      io.debug(expr)
+      echo expr
       todo
     }
   }

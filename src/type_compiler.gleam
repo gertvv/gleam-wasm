@@ -1,12 +1,12 @@
-import glance.{type Type}
 import compiler.{type GlobalState}
-import wat
-import gleam/io
-import gleam/option.{None, Some}
+import glance.{type Type}
 import gleam/dict
-import gleam/result
+import gleam/io
 import gleam/list
+import gleam/option.{None, Some}
+import gleam/result
 import signature_encoder
+import wat
 
 pub fn compile_type(
   state: GlobalState,
@@ -61,7 +61,7 @@ pub fn compile_type(
     }
     glance.VariableType(_) -> Ok(#(state, wat.Ref(wat.Direct(wat.Any))))
     _ -> {
-      io.debug(type_)
+      echo type_
       todo
     }
   }
