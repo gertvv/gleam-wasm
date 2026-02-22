@@ -1,6 +1,8 @@
-import analysis
-import compiler
 import filepath
+import gl_to_wasm/analysis
+import gl_to_wasm/graph
+import gl_to_wasm/prelude
+import gl_to_wasm/project
 import gl_wasm/wasm
 import glance
 import gleam/dict.{type Dict}
@@ -9,10 +11,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/pair
 import gleam/result
-import graph
 import pprint
-import prelude
-import project
 import simplifile
 import snag.{type Snag}
 
@@ -24,7 +23,7 @@ pub fn impl() {
   // TODO: maybe topologically sort the packages, and limit import graph to package boundary?
   use project <- result.try(
     project.scan_project("../gl_example", "wasm")
-    |> snag.map_error(compiler_snag),
+    |> snag.map_error(project_snag),
   )
   use _ <- result.try(output_module(
     project,
@@ -36,7 +35,7 @@ pub fn impl() {
     |> result.try(fn(graph) {
       let #(nodes, edges) = graph
       graph.topological_sort(nodes, edges)
-      |> result.replace_error(compiler.CircularDependencyError)
+      |> result.replace_error(analysis.CircularDependencyError)
     })
     |> snag.map_error(compiler_snag),
   )
@@ -51,12 +50,24 @@ pub fn impl() {
   })
 }
 
-fn compiler_snag(err: compiler.CompilerError) -> String {
+fn project_snag(err: project.Error) -> String {
   case err {
-    compiler.AnotherTypeError(msg) -> msg
-    compiler.FileError(loc, err) ->
+    project.FileError(path:, error:) ->
+      simplifile.describe_error(error) <> " @ " <> path
+    project.CircularDependencyError -> "Circular dependency detected"
+    project.PackageTomlParseError(path:, error:) ->
+      "Unable to parse TOML @ " <> path
+    project.PackageTomlInvalidError(path:, error:) -> error <> " @ " <> path
+    project.NotGleamError -> "The project is not a Gleam project"
+  }
+}
+
+fn compiler_snag(err: analysis.Error) -> String {
+  case err {
+    analysis.AnotherTypeError(msg) -> msg
+    analysis.FileError(loc, err) ->
       simplifile.describe_error(err) <> " @ " <> loc
-    compiler.CircularDependencyError -> "Circular dependency detected"
+    analysis.CircularDependencyError -> "Circular dependency detected"
     _ -> {
       pprint.debug(err)
       "Unmapped compiler error -- fix compiler_snag!"

@@ -1,4 +1,5 @@
-import compiler.{type CompilerError}
+import gl_to_wasm/graph
+import gl_to_wasm/project.{type ModuleId, type Project}
 import glance
 import gleam/bool
 import gleam/dict.{type Dict}
@@ -10,9 +11,8 @@ import gleam/pair
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
-import graph
 import pprint
-import project.{type ModuleId, type Project}
+import simplifile
 
 // TODO:
 // - constructors that have the same name as their type?
@@ -21,6 +21,27 @@ import project.{type ModuleId, type Project}
 // - constants
 // - bit string support
 // - hole types
+
+pub type Error {
+  FileError(path: String, error: simplifile.FileError)
+  CircularDependencyError
+  ParseError(error: glance.Error)
+  SyntaxError(error: String)
+  ReferenceError(name: String)
+  TypeError(at: ErrorLocation, expected_type: Type, actual_type: Type)
+  NotAFunctionError(at: ErrorLocation)
+  ArityError(at: ErrorLocation, expected_number: Int, actual_number: Int)
+  PositionalArgsAfterLabeledArgsError(at: ErrorLocation)
+  NoSuchFieldError(at: ErrorLocation, field: String)
+  TypeArityError(type_: glance.Type, expected_number: Int, actual_number: Int)
+  AnotherTypeError(String)
+}
+
+pub type ErrorLocation {
+  AtExpression(glance.Expression)
+  AtStatement(glance.Statement)
+  AtPattern(glance.Pattern)
+}
 
 // TODO: move somewhere
 pub fn try_map_fold(
@@ -337,7 +358,7 @@ fn fresh_generated_name(context: Context) -> #(Context, glance.AssignmentName) {
 fn resolve_optional_type(
   context: Context,
   typ: Option(glance.Type),
-) -> Result(#(Context, Type), CompilerError) {
+) -> Result(#(Context, Type), Error) {
   case typ {
     Some(t) ->
       resolve_type(context.internals, t)
@@ -367,7 +388,7 @@ fn init_inference_block_internal(
   environment: Dict(String, Type),
   context: Context,
   acc: List(Statement),
-) -> Result(#(Context, List(Statement)), CompilerError) {
+) -> Result(#(Context, List(Statement)), Error) {
   case list, acc {
     [], [] -> {
       // empty blocks have nil type
@@ -399,7 +420,7 @@ pub fn init_inference_block(
   expected_type: Type,
   environment: Dict(String, Type),
   context: Context,
-) -> Result(#(Context, List(Statement)), CompilerError) {
+) -> Result(#(Context, List(Statement)), Error) {
   init_inference_block_internal(list, expected_type, environment, context, [])
   |> result.map(pair.map_second(_, list.reverse))
 }
@@ -411,21 +432,21 @@ fn is_positional_param(arg: glance.Field(a)) -> Bool {
 pub fn pair_args(
   expected signature: FunctionSignature,
   actual args: List(glance.Field(b)),
-  at location: compiler.ErrorLocation,
-) -> Result(List(#(Type, Option(b))), CompilerError) {
+  at location: ErrorLocation,
+) -> Result(List(#(Type, Option(b))), Error) {
   // Number of arguments provided may not exceed the expected
   let n_params =
     list.length(signature.positional_parameters)
     + list.length(signature.labeled_parameters)
   use <- bool.guard(
     n_params < list.length(args),
-    Error(compiler.ArityError(location, n_params, list.length(args))),
+    Error(ArityError(location, n_params, list.length(args))),
   )
   let #(pos_args, label_args) = list.split_while(args, is_positional_param)
   // Positional arguments are not allowed after labeled arguments
   use <- bool.guard(
     list.any(label_args, is_positional_param),
-    Error(compiler.PositionalArgsAfterLabeledArgsError(location)),
+    Error(PositionalArgsAfterLabeledArgsError(location)),
   )
   let params =
     list.append(
@@ -445,8 +466,8 @@ pub fn pair_args(
     |> set.to_list
     |> list.first
   use _ <- result.try(case unexpected_arg {
-    Ok(Some(arg)) -> Error(compiler.NoSuchFieldError(location, arg))
-    Ok(None) -> Error(compiler.NoSuchFieldError(location, ""))
+    Ok(Some(arg)) -> Error(NoSuchFieldError(location, arg))
+    Ok(None) -> Error(NoSuchFieldError(location, ""))
     Error(Nil) -> Ok(Nil)
   })
   // Find value provided for labeled arguments (if provided)
@@ -503,7 +524,7 @@ pub fn module_from_internals(internals: ModuleInternals) -> ModuleInterface {
 fn find_module_by_name(
   internals: ModuleInternals,
   maybe_module_name: Option(String),
-) -> Result(ModuleInterface, compiler.CompilerError) {
+) -> Result(ModuleInterface, Error) {
   case maybe_module_name {
     None -> Ok(internals_as_module(internals))
     Some(module_name) -> lookup(internals.imports, module_name)
@@ -513,7 +534,7 @@ fn find_module_by_name(
 fn find_module_by_id(
   internals: ModuleInternals,
   module_id: ModuleId,
-) -> Result(ModuleInterface, compiler.CompilerError) {
+) -> Result(ModuleInterface, Error) {
   dict.values(internals.imports)
   |> list.find(fn(module) { module.location == module_id })
   |> result.lazy_or(fn() {
@@ -522,14 +543,11 @@ fn find_module_by_id(
       True -> Ok(internals_as_module(internals))
     }
   })
-  |> result.replace_error(compiler.AnotherTypeError("Could not find module"))
+  |> result.replace_error(AnotherTypeError("Could not find module"))
 }
 
-fn lookup(
-  dict: Dict(String, b),
-  key: String,
-) -> Result(b, compiler.CompilerError) {
-  dict.get(dict, key) |> result.replace_error(compiler.ReferenceError(key))
+fn lookup(dict: Dict(String, b), key: String) -> Result(b, Error) {
+  dict.get(dict, key) |> result.replace_error(ReferenceError(key))
 }
 
 fn unzip_patterns_with_variables(
@@ -550,7 +568,7 @@ fn init_inference_pattern_list(
   expected_type: Type,
   environment: Dict(String, Type),
   context: Context,
-) -> Result(#(Context, PatternList, Dict(String, Type)), CompilerError) {
+) -> Result(#(Context, PatternList, Dict(String, Type)), Error) {
   let #(context, item_type) = fresh_type_variable(context)
   case items, rest {
     [], None ->
@@ -615,7 +633,7 @@ pub fn init_inference_pattern(
   expected_type: Type,
   environment: Dict(String, Type),
   context: Context,
-) -> Result(#(Context, PatternWithVariables), CompilerError) {
+) -> Result(#(Context, PatternWithVariables), Error) {
   case pattern {
     glance.PatternInt(value) ->
       Ok(#(
@@ -727,37 +745,37 @@ pub fn init_inference_pattern(
         maybe_module_name,
       ))
       // find the constructor & related types
-      use #(context, type_id, signature, constructed_type) <- result.try(case
-        dict.get(module.functions, constructor_name)
-      {
-        Ok(signature) -> {
-          case signature_replace_free_type_variables(signature, context) {
-            #(
-              context,
-              FunctionSignature(
-                _name,
-                _pos_params,
-                _lab_params,
-                TypeConstructor(type_id, _type_params) as constructed_type,
-              ) as signature,
-            ) -> {
-              Ok(#(context, type_id, signature, constructed_type))
+      use #(context, type_id, signature, constructed_type) <- result.try(
+        case dict.get(module.functions, constructor_name) {
+          Ok(signature) -> {
+            case signature_replace_free_type_variables(signature, context) {
+              #(
+                context,
+                FunctionSignature(
+                  _name,
+                  _pos_params,
+                  _lab_params,
+                  TypeConstructor(type_id, _type_params) as constructed_type,
+                ) as signature,
+              ) -> {
+                Ok(#(context, type_id, signature, constructed_type))
+              }
+              _ -> Error(AnotherTypeError("Unexpected constructor type"))
             }
-            _ -> Error(compiler.AnotherTypeError("Unexpected constructor type"))
           }
-        }
-        Error(Nil) -> Error(compiler.ReferenceError(constructor_name))
-      })
+          Error(Nil) -> Error(ReferenceError(constructor_name))
+        },
+      )
       // pair up arguments
       use arg_pairs <- result.try(pair_args(
         expected: signature,
         actual: args,
-        at: compiler.AtPattern(pattern),
+        at: AtPattern(pattern),
       ))
       use <- bool.guard(
         when: !with_spread
           && list.any(arg_pairs, fn(pair) { option.is_none(pair.second(pair)) }),
-        return: Error(compiler.AnotherTypeError(
+        return: Error(AnotherTypeError(
           "Constructor pattern without spread must specify all arguments",
         )),
       )
@@ -793,7 +811,7 @@ pub fn init_inference_statement(
   context: Context,
 ) -> Result(
   #(List(glance.Statement), Context, Dict(String, Type), Statement),
-  CompilerError,
+  Error,
 ) {
   case stmt {
     glance.Assignment(
@@ -867,10 +885,7 @@ pub fn init_inference_statement(
                   glance.Variable(assignment_name),
                 )),
               ))
-            _ ->
-              Error(compiler.AnotherTypeError(
-                "This should not have happened...",
-              ))
+            _ -> Error(AnotherTypeError("This should not have happened..."))
           }
         })
         |> result.map(pair.map_second(_, option.values)),
@@ -912,7 +927,7 @@ fn init_inference_call(
   expected_type: Type,
   environment: Dict(String, Type),
   context: Context,
-) -> Result(#(Context, Expression), CompilerError) {
+) -> Result(#(Context, Expression), Error) {
   let #(context, arg_types) =
     case use_callback {
       Some(_) -> [Nil, ..list.map(args, fn(_) { Nil })]
@@ -938,16 +953,12 @@ fn init_inference_call(
       // TODO: inject fresh type variables -- check if safe
       let #(context, signature) =
         signature_replace_free_type_variables(signature, context)
-      use paired <- result.try(pair_args(
-        signature,
-        args,
-        compiler.AtStatement(at_stmt),
-      ))
+      use paired <- result.try(pair_args(signature, args, AtStatement(at_stmt)))
       try_map_fold(over: paired, from: use_callback, with: fn(cb, p) {
         case p, cb {
           #(_t, Some(a)), _ -> Ok(#(cb, a))
           _, Some(a) -> Ok(#(None, a))
-          _, _ -> Error(compiler.AnotherTypeError("Missing argument"))
+          _, _ -> Error(AnotherTypeError("Missing argument"))
         }
       })
       |> result.try(fn(res) {
@@ -955,8 +966,8 @@ fn init_inference_call(
         case cb {
           None -> Ok(#(context, args))
           Some(_) ->
-            Error(compiler.ArityError(
-              compiler.AtStatement(at_stmt),
+            Error(ArityError(
+              AtStatement(at_stmt),
               list.length(args),
               list.length(args) + 1,
             ))
@@ -972,8 +983,7 @@ fn init_inference_call(
         },
         fn(arg) {
           case arg.label {
-            Some(_) ->
-              Error(compiler.AnotherTypeError("Labeled args not allowed here"))
+            Some(_) -> Error(AnotherTypeError("Labeled args not allowed here"))
             None -> Ok(arg.item)
           }
         },
@@ -990,7 +1000,7 @@ fn init_inference_call_internal(
   args: List(glance.Expression),
   environment: Dict(String, Type),
   context: Context,
-) -> Result(#(Context, Expression), CompilerError) {
+) -> Result(#(Context, Expression), Error) {
   // TODO: use strict_zip?
   list.zip(args, arg_types)
   |> try_map_fold(from: context, with: fn(context, arg_pair) {
@@ -1097,14 +1107,14 @@ pub fn init_inference_clause(
   subjects: List(#(Expression, Type)),
   environment: Dict(String, Type),
   context: Context,
-) -> Result(#(Context, Clause), CompilerError) {
+) -> Result(#(Context, Clause), Error) {
   let glance.Clause(alternative_patterns, guard, body) = clause
   // a clause can have one or more alternative sets of patterns
   use #(context, alternative_patterns) <- result.try(
     try_map_fold(alternative_patterns, context, fn(context, patterns) {
       use <- bool.guard(
         list.length(subjects) != list.length(patterns),
-        Error(compiler.AnotherTypeError(
+        Error(AnotherTypeError(
           "Number of patterns must match number of subjects",
         )),
       )
@@ -1135,7 +1145,7 @@ pub fn init_inference_clause(
     alternative_patterns |> list.map(fn(patterns) { patterns.1 })
   use variables <- result.try(
     list.first(alternative_variables)
-    |> result.replace_error(compiler.AnotherTypeError(
+    |> result.replace_error(AnotherTypeError(
       "There must be at least one set of patterns",
     )),
   )
@@ -1143,7 +1153,7 @@ pub fn init_inference_clause(
     when: list.any(alternative_variables, fn(vars) {
       dict.keys(vars) != dict.keys(variables)
     }),
-    return: Error(compiler.AnotherTypeError(
+    return: Error(AnotherTypeError(
       "All alternative patterns must set the same variables",
     )),
   )
@@ -1200,9 +1210,9 @@ fn init_inference_external_function(
   external: FunctionBody,
   expected_type: Type,
   context: Context,
-) -> Result(#(Context, Function), CompilerError) {
+) -> Result(#(Context, Function), Error) {
   let types_required =
-    compiler.AnotherTypeError("External functions must have type declarations")
+    AnotherTypeError("External functions must have type declarations")
   use #(pos_params, label_params) <- result.try(separate_positional_and_labeled(
     def.parameters
     |> list.map(fn(param) { glance.Field(param.label, param.type_) }),
@@ -1254,7 +1264,7 @@ fn init_inference_gleam_function(
   expected_type: Type,
   environment: Dict(String, Type),
   context: Context,
-) -> Result(#(Context, Function), CompilerError) {
+) -> Result(#(Context, Function), Error) {
   use #(pos_params, label_params) <- result.try(separate_positional_and_labeled(
     def.parameters
     |> list.map(fn(param) { glance.Field(param.label, param.type_) }),
@@ -1293,7 +1303,7 @@ fn init_inference_gleam_function(
 pub fn infer_functions(
   internals: ModuleInternals,
   defs: List(glance.Definition(glance.Function)),
-) -> Result(List(Function), CompilerError) {
+) -> Result(List(Function), Error) {
   pprint.debug(list.map(defs, fn(def) { def.definition.name }))
   let context = new_context(internals)
   // TODO: problem! new_context may not be appropriate if functions have been prototyped before... re-prototype?
@@ -1323,7 +1333,7 @@ fn init_inference_function(
   expected_type: Type,
   environment: Dict(String, Type),
   context: Context,
-) -> Result(#(Context, Function), CompilerError) {
+) -> Result(#(Context, Function), Error) {
   let exp_target = context.internals.project.target
   let maybe_external =
     list.find_map(def.attributes, fn(attr) {
@@ -1362,7 +1372,7 @@ fn init_inference_function(
 pub fn infer_function(
   internals: ModuleInternals,
   def: glance.Definition(glance.Function),
-) -> Result(Function, CompilerError) {
+) -> Result(Function, Error) {
   infer_functions(internals, [def])
   |> result.map(fn(res) {
     let assert Ok(function) = list.first(res)
@@ -1401,7 +1411,7 @@ pub fn init_inference(
   expected_type: Type,
   environment: Dict(String, Type),
   context: Context,
-) -> Result(#(Context, Expression), CompilerError) {
+) -> Result(#(Context, Expression), Error) {
   case expr {
     glance.Int(value) -> {
       Ok(#(add_constraint(context, Equal(expected_type, int_type)), Int(value)))
@@ -1567,21 +1577,21 @@ pub fn init_inference(
         maybe_module,
       ))
       // identify the custom type and variant used
-      use #(module_id, custom_type, signature) <- result.try(case
-        dict.get(module.functions, constructor_name)
-      {
-        Ok(
-          FunctionSignature(
-            _name,
-            _pos,
-            _lab,
-            TypeConstructor(TypeFromModule(module_id, _), _) as return_type,
-          ) as signature,
-        ) -> {
-          Ok(#(module_id, return_type, signature))
-        }
-        _ -> Error(compiler.AnotherTypeError("Unexpected constructor type"))
-      })
+      use #(module_id, custom_type, signature) <- result.try(
+        case dict.get(module.functions, constructor_name) {
+          Ok(
+            FunctionSignature(
+              _name,
+              _pos,
+              _lab,
+              TypeConstructor(TypeFromModule(module_id, _), _) as return_type,
+            ) as signature,
+          ) -> {
+            Ok(#(module_id, return_type, signature))
+          }
+          _ -> Error(AnotherTypeError("Unexpected constructor type"))
+        },
+      )
       // TODO: check all fields that are attempted to be set, exist
       // TODO: check that the variant has any record fields
       //
@@ -1592,7 +1602,7 @@ pub fn init_inference(
         })
       // map variant fields to either how they are set in the record update, or their existing value
       use #(context, args) <- result.map(
-        pair_args(signature, fields, compiler.AtExpression(expr))
+        pair_args(signature, fields, AtExpression(expr))
         |> result.map(list.index_map(_, fn(v, i) { #(i, v) }))
         |> result.try(
           try_map_fold(over: _, from: context, with: fn(context, arg) {
@@ -1642,7 +1652,7 @@ pub fn init_inference(
           context,
         ))
       })
-      |> result.replace_error(compiler.AnotherTypeError("Field access error"))
+      |> result.replace_error(AnotherTypeError("Field access error"))
       |> result.lazy_or(fn() {
         init_inference_call_builtin(
           AccessField(None, ByLabel(label)),
@@ -1778,7 +1788,7 @@ fn occurs_in(var: String, t: Type) -> Bool {
   }
 }
 
-fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
+fn unify(context: Context, a: Type, b: Type) -> Result(Context, Error) {
   let sub_a = get_sub(context, a)
   let sub_b = get_sub(context, b)
   case a, b {
@@ -1786,7 +1796,7 @@ fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
     FunctionType(args_i, ret_i), FunctionType(args_j, ret_j) -> {
       case list.length(args_i) == list.length(args_j) {
         False -> {
-          Error(compiler.AnotherTypeError(
+          Error(AnotherTypeError(
             "Unable to unify argument lists of different lengths",
           ))
         }
@@ -1809,7 +1819,7 @@ fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
     TypeVariable(i), _ if sub_a != Error(Nil) ->
       case occurs_in(i, b) {
         True ->
-          Error(compiler.AnotherTypeError(
+          Error(AnotherTypeError(
             "Can not substitute variable by expression that contains it",
           ))
         False -> Ok(add_substitution(context, i, b))
@@ -1817,22 +1827,20 @@ fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
     _, TypeVariable(j) if sub_b != Error(Nil) ->
       case occurs_in(j, a) {
         True ->
-          Error(compiler.AnotherTypeError(
+          Error(AnotherTypeError(
             "Can not substitute variable by expression that contains it",
           ))
         False -> Ok(add_substitution(context, j, a))
       }
     TypeVariable(_), _ | _, TypeVariable(_) -> {
       pprint.debug(#(context.substitution, a, sub_a, b, sub_b))
-      Error(compiler.AnotherTypeError(
-        "Could not find a substitutable type variable",
-      ))
+      Error(AnotherTypeError("Could not find a substitutable type variable"))
     }
     TypeConstructor(id_i, args_i), TypeConstructor(id_j, args_j) -> {
       case id_i == id_j && list.length(args_i) == list.length(args_j) {
         False -> {
           pprint.debug(#(a, b))
-          Error(compiler.AnotherTypeError("Mismatching TypeConstructors"))
+          Error(AnotherTypeError("Mismatching TypeConstructors"))
         }
         True -> {
           list.zip(args_i, args_j)
@@ -1846,14 +1854,12 @@ fn unify(context: Context, a: Type, b: Type) -> Result(Context, CompilerError) {
     | TypeConstructor(_, _), FunctionType(_, _)
     -> {
       pprint.debug(#(a, b))
-      Error(compiler.AnotherTypeError("Unification not implemented"))
+      Error(AnotherTypeError("Unification not implemented"))
     }
   }
 }
 
-pub fn solve_constraints(
-  context: Context,
-) -> Result(Dict(String, Type), CompilerError) {
+pub fn solve_constraints(context: Context) -> Result(Dict(String, Type), Error) {
   // TODO: rather than sort, probably need an iterative / recursive solve
   list.sort(context.constraints, fn(a, b) {
     case a, b {
@@ -1871,23 +1877,19 @@ pub fn solve_constraints(
           TypeConstructor(TypeFromModule(module_id, type_name), _params) ->
             Ok(#(module_id, type_name))
           FunctionType(_, _) ->
-            Error(compiler.AnotherTypeError(
-              "Can not access field of function type",
-            ))
+            Error(AnotherTypeError("Can not access field of function type"))
           TypeConstructor(BuiltInType(_), _) ->
-            Error(compiler.AnotherTypeError(
-              "Can not access field of built-in type",
-            ))
+            Error(AnotherTypeError("Can not access field of built-in type"))
           TypeVariable(_) ->
             case get_sub(context, container_type) {
               Error(Nil) ->
-                Error(compiler.AnotherTypeError(
+                Error(AnotherTypeError(
                   "Type variable does not have substitution",
                 ))
               Ok(TypeConstructor(TypeFromModule(module_id, type_name), _params)) ->
                 Ok(#(module_id, type_name))
               Ok(_) -> {
-                Error(compiler.AnotherTypeError("Unexpected container type"))
+                Error(AnotherTypeError("Unexpected container type"))
               }
             }
         })
@@ -1901,9 +1903,7 @@ pub fn solve_constraints(
             field.label == field_name
           })
         })
-        |> result.replace_error(compiler.AnotherTypeError(
-          "Not all variants have field",
-        ))
+        |> result.replace_error(AnotherTypeError("Not all variants have field"))
         |> result.try(fn(fields) {
           let types =
             list.map(fields, fn(field) { field.item })
@@ -1911,7 +1911,7 @@ pub fn solve_constraints(
           case types {
             [t] -> Ok(t)
             _ -> {
-              Error(compiler.AnotherTypeError(
+              Error(AnotherTypeError(
                 "Field type not consistent across variants",
               ))
             }
@@ -1922,18 +1922,16 @@ pub fn solve_constraints(
       HasFieldOfType(container_type, maybe_variant, ByPosition(i), field_type) -> {
         use tuple_params <- result.try(case container_type {
           FunctionType(_, _) ->
-            Error(compiler.AnotherTypeError("Functions do not have fields"))
+            Error(AnotherTypeError("Functions do not have fields"))
           TypeConstructor(BuiltInType(TupleType(_n)), params) -> Ok(params)
           TypeConstructor(_, _) ->
-            Error(compiler.AnotherTypeError(
+            Error(AnotherTypeError(
               "ByPosition constraint not implemented for Constructor",
             ))
           TypeVariable(_) ->
             case get_sub(context, container_type) {
               Error(Nil) ->
-                Error(compiler.AnotherTypeError(
-                  "No substitution for type variable",
-                ))
+                Error(AnotherTypeError("No substitution for type variable"))
               Ok(TypeConstructor(BuiltInType(TupleType(_n)), params)) ->
                 Ok(params)
               Ok(TypeConstructor(TypeFromModule(module_id, type_name), _params)) -> {
@@ -1948,9 +1946,7 @@ pub fn solve_constraints(
                       list.find(custom_type.variants, fn(variant) {
                         variant.name == variant_name
                       })
-                      |> result.replace_error(compiler.ReferenceError(
-                        variant_name,
-                      ))
+                      |> result.replace_error(ReferenceError(variant_name))
                     })
                     |> result.map(fn(variant) {
                       list.append(
@@ -1960,13 +1956,13 @@ pub fn solve_constraints(
                     })
                   }
                   None ->
-                    Error(compiler.AnotherTypeError(
+                    Error(AnotherTypeError(
                       "Indexing into custom type by position expects variant",
                     ))
                 }
               }
               Ok(_) ->
-                Error(compiler.AnotherTypeError(
+                Error(AnotherTypeError(
                   "Unexpected type for ByPosition indexing",
                 ))
             }
@@ -1975,7 +1971,7 @@ pub fn solve_constraints(
         list.split(tuple_params, i)
         |> pair.second
         |> list.first
-        |> result.replace_error(compiler.AnotherTypeError(
+        |> result.replace_error(AnotherTypeError(
           "Tuple does not have element at the given index",
         ))
         // TODO: if I put field_type third rather than second I get infinite loops?
@@ -2065,7 +2061,7 @@ pub fn substitute_function(f: Function, subs: Dict(String, Type)) -> Function {
     argument_names: f.argument_names,
     body: case f.body {
       GleamBody(body) -> GleamBody(substitute_statement_list(body, subs))
-      _ as extern -> extern
+      extern -> extern
     },
   )
 }
@@ -2164,7 +2160,7 @@ pub fn substitute_expression(
 pub fn infer(
   expr: glance.Expression,
   data: ModuleInternals,
-) -> Result(Expression, CompilerError) {
+) -> Result(Expression, Error) {
   let #(context, type_var) = fresh_type_variable(new_context(data))
   init_inference(expr, type_var, dict.new(), context)
   |> result.try(fn(initd) {
@@ -2178,18 +2174,18 @@ fn resolve_module(
   project: Project,
   importing_package: String,
   imported_module: String,
-) -> Result(ModuleId, CompilerError) {
-  use _ <- result.try_recover(project.get_module_location(
+) -> Result(ModuleId, Error) {
+  use _ <- result.try_recover(project.module_id(
     project,
     importing_package,
     imported_module,
   ))
-  list.find_map(dict.keys(project.packages), project.get_module_location(
+  list.find_map(dict.keys(project.packages), project.module_id(
     project,
     _,
     imported_module,
   ))
-  |> result.replace_error(compiler.ReferenceError(imported_module))
+  |> result.replace_error(ReferenceError(imported_module))
 }
 
 // TODO: distinguish between types/functions accessible within the module vs defined within it?
@@ -2229,7 +2225,7 @@ fn prototype(parameters: List(String)) -> GenericType {
 pub fn resolve_type(
   data: ModuleInternals,
   declared_type: glance.Type,
-) -> Result(Type, CompilerError) {
+) -> Result(Type, Error) {
   case declared_type {
     glance.NamedType(name, module_option, params) -> {
       let candidate = case module_option {
@@ -2260,7 +2256,7 @@ pub fn resolve_type(
                 |> substitute(nested_type, _)
               // now match and replace type parameters
               list.strict_zip(rep_params, act_params)
-              |> result.replace_error(compiler.TypeArityError(
+              |> result.replace_error(TypeArityError(
                 declared_type,
                 list.length(exp_params),
                 list.length(act_params),
@@ -2332,30 +2328,28 @@ fn resolve_variant_field(
   data: ModuleInternals,
   parameters: set.Set(String),
   field_type: glance.Type,
-) -> Result(Type, CompilerError) {
+) -> Result(Type, Error) {
   resolve_type(data, field_type)
   |> result.try(fn(t) {
     let undeclared =
       find_type_variables(t) |> set.difference(parameters) |> set.to_list
     case undeclared {
       [] -> Ok(t)
-      [u, ..] -> Error(compiler.ReferenceError(u))
+      [u, ..] -> Error(ReferenceError(u))
     }
   })
 }
 
 fn separate_positional_and_labeled(
   parameters: List(glance.Field(a)),
-) -> Result(#(List(a), List(Labeled(a))), compiler.CompilerError) {
+) -> Result(#(List(a), List(Labeled(a))), Error) {
   let #(pos_params, label_params) =
     list.split_while(parameters, is_positional_param)
   // Positional arguments are not allowed after labeled arguments
   use <- bool.guard(
     list.any(label_params, is_positional_param),
-    Error(compiler.AnotherTypeError(
-      "Positional params not allowed after labeled params",
-    )),
-    // TODO: Error(compiler.PositionalArgsAfterLabeledArgsError(location)),
+    Error(AnotherTypeError("Positional params not allowed after labeled params")),
+    // TODO: Error(PositionalArgsAfterLabeledArgsError(location)),
   )
   let pos_params = list.map(pos_params, fn(field) { field.item })
   let label_params =
@@ -2371,7 +2365,7 @@ fn resolve_variant(
   parameters: set.Set(String),
   variant: glance.Variant,
   return_type: Type,
-) -> Result(FunctionSignature, CompilerError) {
+) -> Result(FunctionSignature, Error) {
   use #(pos_params, label_params) <- result.try(separate_positional_and_labeled(
     variant.fields,
   ))
@@ -2393,7 +2387,7 @@ fn resolve_variant(
 pub fn resolve_custom_type(
   data: ModuleInternals,
   parsed: glance.Definition(glance.CustomType),
-) -> Result(#(String, CustomType), CompilerError) {
+) -> Result(#(String, CustomType), Error) {
   let type_id =
     TypeConstructor(
       TypeFromModule(data.location, parsed.definition.name),
@@ -2417,7 +2411,7 @@ pub fn resolve_custom_type(
 fn resolve_type_alias(
   data: ModuleInternals,
   parsed: glance.Definition(glance.TypeAlias),
-) -> Result(#(String, GenericType), CompilerError) {
+) -> Result(#(String, GenericType), Error) {
   resolve_type(data, parsed.definition.aliased)
   |> result.map(fn(resolved) {
     #(
@@ -2578,7 +2572,7 @@ pub fn resolve_types(
   imports: Dict(String, ModuleId),
   modules: Dict(ModuleId, ModuleInterface),
   parsed: glance.Module,
-) -> Result(ModuleInternals, CompilerError) {
+) -> Result(ModuleInternals, Error) {
   // Create prototypes (placeholders) for all declared types
   let custom_prototypes =
     parsed.custom_types
@@ -2624,7 +2618,7 @@ pub fn resolve_types(
       resolve_module(project, internals.location.package_name, module_path)
       |> result.try(fn(module_id) {
         dict.get(modules, module_id)
-        |> result.replace_error(compiler.ReferenceError(module_path))
+        |> result.replace_error(ReferenceError(module_path))
       })
       |> result.try(fn(module) { lookup(module.types, name) })
       |> result.map(fn(typ) { #(alias, typ) })
@@ -2656,7 +2650,7 @@ pub fn resolve_types(
         GenericType(
           TypeConstructor(
             TypeFromModule(location, name),
-            custom_type.parameters |> list.map(TypeVariable(_)),
+            custom_type.parameters |> list.map(TypeVariable),
           ),
           custom_type.parameters,
         )
@@ -2670,22 +2664,14 @@ pub fn resolve_types(
     list.append(
       list.map(parsed.type_aliases, fn(alias) {
         let glance.Definition(
-          definition: glance.TypeAlias(
-            name:,
-            publicity:,
-            ..,
-          ),
+          definition: glance.TypeAlias(name:, publicity:, ..),
           ..,
         ) = alias
         #(name, publicity)
       }),
       list.map(parsed.custom_types, fn(alias) {
         let glance.Definition(
-          definition: glance.CustomType(
-            name:,
-            publicity:,
-            ..,
-          ),
+          definition: glance.CustomType(name:, publicity:, ..),
           ..,
         ) = alias
         #(name, publicity)
@@ -2707,15 +2693,10 @@ pub fn resolve_types(
 pub fn prototype_function_signature(
   internals: ModuleInternals,
   def: glance.Definition(glance.Function),
-) -> Result(FunctionSignature, CompilerError) {
+) -> Result(FunctionSignature, Error) {
   let context = new_context(internals)
   let glance.Definition(
-    definition: glance.Function(
-      name:,
-      parameters:,
-      return:,
-      ..,
-    ),
+    definition: glance.Function(name:, parameters:, return:, ..),
     ..,
   ) = def
   use #(pos_args, lab_args) <- result.try(
@@ -2743,11 +2724,24 @@ pub fn prototype_function_signature(
   FunctionSignature(name, pos_args, lab_args, return)
 }
 
+fn parse_module(
+  project: Project,
+  location: ModuleId,
+) -> Result(glance.Module, Error) {
+  let path = project.module_source_path(project, location)
+  simplifile.read(path)
+  |> result.map_error(FileError(path, _))
+  |> result.try(fn(str) {
+    glance.module(str)
+    |> result.map_error(ParseError)
+  })
+}
+
 fn parse_module_imports(
   project: Project,
   module_id: ModuleId,
-) -> Result(List(ModuleId), CompilerError) {
-  use parsed <- result.try(project.parse_module(project, module_id))
+) -> Result(List(ModuleId), Error) {
+  use parsed <- result.try(parse_module(project, module_id))
   list.try_map(parsed.imports, fn(import_) {
     case import_ {
       glance.Definition(definition: glance.Import(module: module_name, ..), ..) -> {
@@ -2760,7 +2754,7 @@ fn parse_module_imports(
 
 pub fn analyze_project_imports(
   p: Project,
-) -> Result(graph.Graph(ModuleId), CompilerError) {
+) -> Result(graph.Graph(ModuleId), Error) {
   dict.values(p.packages)
   |> list.try_map(fn(package) {
     case package {
@@ -2795,14 +2789,14 @@ pub fn analyze_module(
   project: Project,
   location: ModuleId,
   modules: Dict(ModuleId, ModuleInterface),
-) -> Result(ModuleInternals, CompilerError) {
+) -> Result(ModuleInternals, Error) {
   pprint.debug(
     ">>> analyze_high_level "
     <> location.module_path
     <> " "
     <> location.package_name,
   )
-  use parsed <- result.try(project.parse_module(project, location))
+  use parsed <- result.try(parse_module(project, location))
   use imports <- result.try(
     list.try_map(parsed.imports, fn(import_) {
       use #(alias, location) <- result.try(case import_ {
@@ -2827,7 +2821,7 @@ pub fn analyze_module(
       })
       use module <- result.map(
         dict.get(modules, location)
-        |> result.replace_error(compiler.ReferenceError(
+        |> result.replace_error(ReferenceError(
           location.package_name <> ":" <> location.module_path,
         )),
       )
@@ -2930,7 +2924,7 @@ pub fn analyze_module(
       ))
       use module <- result.try(
         dict.get(modules, module_id)
-        |> result.replace_error(compiler.ReferenceError(module_name)),
+        |> result.replace_error(ReferenceError(module_name)),
       )
       lookup(module.functions, value_name)
       |> result.map(fn(signature) { #(value_name, signature) })
@@ -2978,7 +2972,7 @@ pub fn analyze_module(
   let #(nodes, edges) = graph.squash_cycles(nodes, edges)
   use sorted_functions <- result.try(
     graph.topological_sort(nodes, edges)
-    |> result.replace_error(compiler.CircularDependencyError),
+    |> result.replace_error(CircularDependencyError),
   )
   use internals <- result.map(
     list.try_fold(
@@ -2988,9 +2982,7 @@ pub fn analyze_module(
         list.try_map(fn_names, fn(name) {
           list.find(target_functions, fn(fun) { fun.definition.name == name })
         })
-        |> result.replace_error(compiler.AnotherTypeError(
-          "Function disappeared...",
-        ))
+        |> result.replace_error(AnotherTypeError("Function disappeared..."))
         |> result.try(infer_functions(internals, _))
         |> result.map(fn(functions) {
           ModuleInternals(

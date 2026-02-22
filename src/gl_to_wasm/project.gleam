@@ -1,10 +1,6 @@
-import compiler.{type CompilerError}
 import filepath
-import glance
 import gleam/dict.{type Dict}
-import gleam/dynamic
 import gleam/list
-import gleam/option.{None, Some}
 import gleam/pair
 import gleam/result
 import gleam/set.{type Set}
@@ -13,15 +9,12 @@ import pprint
 import simplifile
 import tom
 
-// TODO: make this project path agnostic
-
 pub type Project {
   Project(
     name: String,
     source_path: String,
     target: String,
     packages: Dict(String, Package),
-    parse_module: fn(Project, ModuleId) -> Result(glance.Module, CompilerError),
   )
 }
 
@@ -39,6 +32,14 @@ pub type ModuleId {
   ModuleId(package_name: String, module_path: String)
 }
 
+pub type Error {
+  FileError(path: String, error: simplifile.FileError)
+  PackageTomlParseError(path: String, error: tom.ParseError)
+  PackageTomlInvalidError(path: String, error: String)
+  CircularDependencyError
+  NotGleamError
+}
+
 pub fn shorthand(loc: ModuleId) -> String {
   filepath.base_name(loc.module_path)
 }
@@ -46,15 +47,15 @@ pub fn shorthand(loc: ModuleId) -> String {
 fn parse_gleam_toml(source_path: String) {
   let path = filepath.join(source_path, "gleam.toml")
   simplifile.read(path)
-  |> result.map_error(compiler.FileError(path, _))
+  |> result.map_error(FileError(path, _))
   |> result.try(fn(str) {
     use toml <- result.try(
       tom.parse(str)
-      |> result.replace_error(compiler.PackageTomlError("Parse failed " <> path)),
+      |> result.map_error(PackageTomlParseError(path, _)),
     )
     use name <- result.map(
       tom.get_string(toml, ["name"])
-      |> result.replace_error(compiler.PackageTomlError("Name is missing")),
+      |> result.replace_error(PackageTomlInvalidError(path, "Name is missing")),
     )
     let deps =
       tom.get_table(toml, ["dependencies"])
@@ -69,7 +70,7 @@ fn list_modules(package_path: String) {
   let suffix = ".gleam"
   use files <- result.map(
     simplifile.get_files(prefix)
-    |> result.map_error(compiler.FileError(prefix, _)),
+    |> result.map_error(FileError(prefix, _)),
   )
   list.map(files, string.drop_start(_, string.length(prefix) + 1))
   |> list.filter(string.ends_with(_, suffix))
@@ -89,8 +90,8 @@ fn scan_package(source_path: String) {
     Ok(True), _ -> {
       Ok(OtherPackage(filepath.base_name(source_path), source_path))
     }
-    Ok(False), _ -> Error(compiler.FileError(source_path, simplifile.Enotdir))
-    Error(e), _ -> Error(compiler.FileError(source_path, e))
+    Ok(False), _ -> Error(FileError(source_path, simplifile.Enotdir))
+    Error(e), _ -> Error(FileError(source_path, e))
   }
 }
 
@@ -100,17 +101,16 @@ fn scan_packages(
   package_name: String,
   packages: Dict(String, Package),
   chain: Set(String),
-) -> Result(#(String, Dict(String, Package)), CompilerError) {
+) -> Result(#(String, Dict(String, Package)), Error) {
   let package_path =
     package_source_path(project_name, source_path, package_name)
   use package <- result.try(scan_package(package_path))
   let packages = dict.insert(packages, package.name, package)
-  pprint.debug(package)
   case package {
     GleamPackage(dependencies: dependencies, ..) -> {
       list.try_fold(dependencies, packages, fn(packages, dependency) {
         case set.contains(chain, dependency), dict.get(packages, dependency) {
-          True, _ -> Error(compiler.CircularDependencyError)
+          True, _ -> Error(CircularDependencyError)
           False, Ok(_) -> Ok(packages)
           False, Error(_) -> {
             result.map(
@@ -138,7 +138,7 @@ pub fn scan_project(source_path: String, target: String) {
     |> result.try(fn(package) {
       case package {
         GleamPackage(name:, ..) -> Ok(name)
-        _ -> Error(compiler.AnotherTypeError("Not a gleam project"))
+        _ -> Error(NotGleamError)
       }
     }),
   )
@@ -149,11 +149,12 @@ pub fn scan_project(source_path: String, target: String) {
     dict.new(),
     set.new(),
   ))
-  Project(name:, source_path:, target:, packages:, parse_module:)
+  Project(name:, source_path:, target:, packages:)
 }
 
 pub fn main() {
-  echo scan_project(".", "javascript")
+  scan_project("../gl_example", "erlang")
+  |> pprint.debug
 }
 
 pub fn package_build_path(project: Project, package_name: String) -> String {
@@ -170,7 +171,7 @@ fn package_source_path(project_name, source_path, package_name) {
   }
 }
 
-fn as_path(project: Project, location: ModuleId) -> String {
+pub fn module_source_path(project: Project, location: ModuleId) -> String {
   [
     package_source_path(
       project.name,
@@ -183,20 +184,7 @@ fn as_path(project: Project, location: ModuleId) -> String {
   |> list.fold("", filepath.join)
 }
 
-fn parse_module(
-  project: Project,
-  location: ModuleId,
-) -> Result(glance.Module, CompilerError) {
-  let path = as_path(project, location)
-  simplifile.read(path)
-  |> result.map_error(compiler.FileError(path, _))
-  |> result.try(fn(str) {
-    glance.module(str)
-    |> result.map_error(compiler.ParseError)
-  })
-}
-
-pub fn get_module_location(
+pub fn module_id(
   project: Project,
   package_name: String,
   path: String,

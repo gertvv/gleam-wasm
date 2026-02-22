@@ -1,5 +1,5 @@
+import gl_to_wasm/graph
 import gleeunit/should
-import graph
 
 pub fn squash_cycles_test() {
   graph.squash_cycles(["a", "b", "c"], [#("a", "b"), #("a", "c"), #("b", "c")])

@@ -1,5 +1,5 @@
-import analysis
-import compiler
+import gl_to_wasm/analysis
+import gl_to_wasm/project
 import glance
 import gleam/dict
 import gleam/list
@@ -8,13 +8,17 @@ import gleam/pair
 import gleam/result
 import gleam/set
 import gleeunit/should
-import project
+
+pub const int_type = glance.NamedType("Int", None, [])
+
+pub const float_type = glance.NamedType("Float", None, [])
+
+pub fn list_type(elem_type: glance.Type) -> glance.Type {
+  glance.NamedType("List", None, [elem_type])
+}
 
 fn empty_module_internals(package_name, module_path) {
-  let project =
-    project.Project(package_name, ".", "javascript", dict.new(), fn(_a, _b) {
-      Error(compiler.ReferenceError("test"))
-    })
+  let project = project.Project(package_name, ".", "javascript", dict.new())
   let location = project.ModuleId(package_name, module_path)
   analysis.ModuleInternals(
     project,
@@ -30,7 +34,7 @@ fn empty_module_internals(package_name, module_path) {
 }
 
 pub fn pair_args_test() {
-  let at = compiler.AtExpression(glance.String("boo"))
+  let at = analysis.AtExpression(glance.String("boo"))
   let named = fn(str, val) { glance.Field(Some(str), val) }
   let positional = fn(val) { glance.Field(None, val) }
   let signature = fn(pos, lab) {
@@ -51,7 +55,7 @@ pub fn pair_args_test() {
     actual: [positional("b"), positional("c")],
     at:,
   )
-  |> should.equal(Error(compiler.ArityError(at, 1, 2)))
+  |> should.equal(Error(analysis.ArityError(at, 1, 2)))
 
   // Fewer actual than expected returns None
   analysis.pair_args(
@@ -75,7 +79,7 @@ pub fn pair_args_test() {
     actual: [named("a", "c"), positional("d")],
     at:,
   )
-  |> should.equal(Error(compiler.PositionalArgsAfterLabeledArgsError(at)))
+  |> should.equal(Error(analysis.PositionalArgsAfterLabeledArgsError(at)))
 
   // Unexpected labeled args not allowed
   analysis.pair_args(
@@ -83,7 +87,7 @@ pub fn pair_args_test() {
     actual: [named("c", "c")],
     at:,
   )
-  |> should.equal(Error(compiler.NoSuchFieldError(at, "c")))
+  |> should.equal(Error(analysis.NoSuchFieldError(at, "c")))
 
   // Labeled args should get paired
   analysis.pair_args(
@@ -111,7 +115,7 @@ pub fn resolve_basic_types_test() {
     empty_module_internals("foo", "bar"),
     glance.NamedType("MyFloat", None, []),
   )
-  |> should.equal(Error(compiler.ReferenceError("MyFloat")))
+  |> should.equal(Error(analysis.ReferenceError("MyFloat")))
 
   analysis.resolve_type(
     empty_module_internals("foo", "bar"),
@@ -123,7 +127,7 @@ pub fn resolve_basic_types_test() {
     empty_module_internals("foo", "bar"),
     glance.NamedType("List", None, [glance.NamedType("MyFloat", None, [])]),
   )
-  |> should.equal(Error(compiler.ReferenceError("MyFloat")))
+  |> should.equal(Error(analysis.ReferenceError("MyFloat")))
 
   let generic_custom_type_id =
     analysis.TypeFromModule(project.ModuleId("foo", "bar"), "CustomType")
@@ -176,7 +180,7 @@ pub fn resolve_basic_types_test() {
     glance.NamedType("CustomType", None, [glance.VariableType("x")]),
   )
   |> should.equal(
-    Error(compiler.TypeArityError(
+    Error(analysis.TypeArityError(
       glance.NamedType("CustomType", None, [glance.VariableType("x")]),
       2,
       1,
@@ -185,10 +189,7 @@ pub fn resolve_basic_types_test() {
 }
 
 pub fn resolve_dependent_custom_types_test() {
-  let project =
-    project.Project("test", ".", "javascript", dict.new(), fn(_a, _b) {
-      Error(compiler.ReferenceError("foo"))
-    })
+  let project = project.Project("test", ".", "javascript", dict.new())
   let location = project.ModuleId("test", "bar")
 
   let assert Ok(internals) =
@@ -248,7 +249,7 @@ pub fn resolve_dependent_custom_types_test() {
         glance.Definition(
           [],
           glance.CustomType("TypeA", glance.Public, False, [], [
-            glance.Variant("TypeA", [glance.Field(None, compiler.int_type)]),
+            glance.Variant("TypeA", [glance.Field(None, int_type)]),
           ]),
         ),
         glance.Definition(
@@ -279,7 +280,7 @@ pub fn resolve_dependent_custom_types_test() {
         glance.Definition(
           [],
           glance.CustomType("TypeA", glance.Public, False, [], [
-            glance.Variant("TypeA", [glance.Field(None, compiler.int_type)]),
+            glance.Variant("TypeA", [glance.Field(None, int_type)]),
           ]),
         ),
         glance.Definition(
@@ -351,10 +352,7 @@ pub fn resolve_dependent_custom_types_test() {
 }
 
 pub fn resolve_type_aliases_test() {
-  let project =
-    project.Project("test", ".", "javascript", dict.new(), fn(_a, _b) {
-      Error(compiler.ReferenceError("foo"))
-    })
+  let project = project.Project("test", ".", "javascript", dict.new())
   let location = project.ModuleId("test", "bar")
 
   analysis.resolve_types(
@@ -368,7 +366,7 @@ pub fn resolve_type_aliases_test() {
       type_aliases: [
         glance.Definition(
           [],
-          glance.TypeAlias("Alias", glance.Public, [], compiler.int_type),
+          glance.TypeAlias("Alias", glance.Public, [], int_type),
         ),
       ],
       constants: [],
@@ -393,12 +391,7 @@ pub fn resolve_type_aliases_test() {
       type_aliases: [
         glance.Definition(
           [],
-          glance.TypeAlias(
-            "Alias",
-            glance.Public,
-            [],
-            compiler.list_type(compiler.int_type),
-          ),
+          glance.TypeAlias("Alias", glance.Public, [], list_type(int_type)),
         ),
       ],
       constants: [],
@@ -432,7 +425,7 @@ pub fn resolve_type_aliases_test() {
             "Alias",
             glance.Public,
             ["a"],
-            compiler.list_type(glance.VariableType("a")),
+            list_type(glance.VariableType("a")),
           ),
         ),
       ],
@@ -481,7 +474,7 @@ pub fn resolve_type_aliases_test() {
         ),
       ]),
     ),
-    glance.NamedType("Alias", None, [compiler.int_type, compiler.float_type]),
+    glance.NamedType("Alias", None, [int_type, float_type]),
   )
   |> should.equal(
     Ok(analysis.FunctionType([analysis.int_type], analysis.float_type)),
@@ -1134,9 +1127,7 @@ pub fn type_infer_constructor_pattern_test() {
     analysis.CustomType([], False, [variant_a, variant_b])
   let internals =
     analysis.ModuleInternals(
-      project: project.Project("name", ".", "javascript", dict.new(), fn(_, _) {
-        panic
-      }),
+      project: project.Project("name", ".", "javascript", dict.new()),
       location: module_id,
       imports: dict.new(),
       types: dict.from_list([#("MyType", analysis.GenericType(my_type, []))]),
@@ -1243,9 +1234,7 @@ pub fn type_infer_field_access_test() {
     )
   let internals =
     analysis.ModuleInternals(
-      project: project.Project("name", ".", "javascript", dict.new(), fn(_, _) {
-        panic
-      }),
+      project: project.Project("name", ".", "javascript", dict.new()),
       location: module_id,
       imports: dict.new(),
       types: dict.from_list([#("MyType", analysis.GenericType(my_type, []))]),
@@ -2050,8 +2039,8 @@ pub fn result_test() {
         [],
         Some(
           glance.NamedType("Result", None, [
-            compiler.float_type,
-            compiler.int_type,
+            float_type,
+            int_type,
           ]),
         ),
         [
@@ -2086,19 +2075,19 @@ pub fn result_test() {
 
 fn parse_single_function(
   code: String,
-) -> Result(glance.Definition(glance.Function), compiler.CompilerError) {
+) -> Result(glance.Definition(glance.Function), analysis.Error) {
   glance.module(code)
-  |> result.map_error(compiler.ParseError)
+  |> result.map_error(analysis.ParseError)
   |> result.try(fn(module) {
     list.first(module.functions)
-    |> result.replace_error(compiler.AnotherTypeError("No function found"))
+    |> result.replace_error(analysis.AnotherTypeError("No function found"))
   })
 }
 
 fn infer_single_function(
   internals: analysis.ModuleInternals,
   code: String,
-) -> Result(analysis.Function, compiler.CompilerError) {
+) -> Result(analysis.Function, analysis.Error) {
   parse_single_function(code)
   |> result.try(fn(def) {
     analysis.prototype_function_signature(internals, def)

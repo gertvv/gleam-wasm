@@ -18,7 +18,6 @@ simplifile = "~> 2.0"
 filepath = ">= 1.0.0 and < 2.0.0"
 pprint = ">= 1.0.4 and < 2.0.0"
 gleam_stdlib = ">= 0.47.0 and < 0.68.0"
-gleb128 = ">= 3.0.0 and < 4.0.0"
 gl_wasm = { path = "../gl_wasm" }
 snag = ">= 1.1.0 and < 2.0.0"
 tom = ">= 2.0.1 and < 3.0.0"

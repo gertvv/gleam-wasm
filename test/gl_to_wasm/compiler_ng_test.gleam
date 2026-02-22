@@ -1,9 +1,9 @@
-import analysis
-import compiler_ng
+import gl_to_wasm/analysis
+import gl_to_wasm/compiler_ng
+import gl_to_wasm/project
 import glance
 import gleam/option.{None, Some}
 import gleeunit/should
-import project
 
 pub fn implicit_functions_none_test() {
   analysis.Function(
