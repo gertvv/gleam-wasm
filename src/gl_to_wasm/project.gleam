@@ -1,12 +1,13 @@
 import filepath
+import gl_to_wasm/graph.{type Graph}
+import gl_to_wasm/io_context.{type IOContext}
+import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/pair
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
-import pprint
-import simplifile
 import tom
 
 pub type Project {
@@ -32,21 +33,20 @@ pub type ModuleId {
   ModuleId(package_name: String, module_path: String)
 }
 
-pub type Error {
-  FileError(path: String, error: simplifile.FileError)
+pub type Error(e) {
+  FileError(path: String, error: e)
   PackageTomlParseError(path: String, error: tom.ParseError)
   PackageTomlInvalidError(path: String, error: String)
-  CircularDependencyError
   NotGleamError
 }
 
-pub fn shorthand(loc: ModuleId) -> String {
+pub fn module_shorthand(loc: ModuleId) -> String {
   filepath.base_name(loc.module_path)
 }
 
-fn parse_gleam_toml(source_path: String) {
+fn parse_gleam_toml(source_path: String, io: IOContext(e)) {
   let path = filepath.join(source_path, "gleam.toml")
-  simplifile.read(path)
+  io.read(path)
   |> result.map_error(FileError(path, _))
   |> result.try(fn(str) {
     use toml <- result.try(
@@ -65,11 +65,11 @@ fn parse_gleam_toml(source_path: String) {
   })
 }
 
-fn list_modules(package_path: String) {
+fn list_modules(package_path: String, io: IOContext(e)) {
   let prefix = filepath.join(package_path, "src")
   let suffix = ".gleam"
   use files <- result.map(
-    simplifile.get_files(prefix)
+    io.list_recursive(prefix)
     |> result.map_error(FileError(prefix, _)),
   )
   list.map(files, string.drop_start(_, string.length(prefix) + 1))
@@ -77,21 +77,20 @@ fn list_modules(package_path: String) {
   |> list.map(string.drop_end(_, string.length(suffix)))
 }
 
-fn scan_package(source_path: String) {
-  case
-    simplifile.is_directory(source_path),
-    simplifile.is_file(filepath.join(source_path, "gleam.toml"))
-  {
-    Ok(True), Ok(True) -> {
-      use #(name, dependencies) <- result.try(parse_gleam_toml(source_path))
-      use modules <- result.map(list_modules(source_path))
+fn scan_package(source_path: String, io: IOContext(e)) {
+  use files <- result.try(
+    io.list(source_path)
+    |> result.map_error(FileError(source_path, _)),
+  )
+  case list.contains(files, "gleam.toml") {
+    True -> {
+      use #(name, dependencies) <- result.try(parse_gleam_toml(source_path, io))
+      use modules <- result.map(list_modules(source_path, io))
       GleamPackage(name, source_path, dependencies, set.from_list(modules))
     }
-    Ok(True), _ -> {
+    False -> {
       Ok(OtherPackage(filepath.base_name(source_path), source_path))
     }
-    Ok(False), _ -> Error(FileError(source_path, simplifile.Enotdir))
-    Error(e), _ -> Error(FileError(source_path, e))
   }
 }
 
@@ -100,41 +99,32 @@ fn scan_packages(
   source_path: String,
   package_name: String,
   packages: Dict(String, Package),
-  chain: Set(String),
-) -> Result(#(String, Dict(String, Package)), Error) {
-  let package_path =
-    package_source_path(project_name, source_path, package_name)
-  use package <- result.try(scan_package(package_path))
+  io: IOContext(e),
+) -> Result(#(String, Dict(String, Package)), Error(e)) {
+  use package <- result.try(scan_package(
+    package_source_path(project_name, source_path, package_name),
+    io,
+  ))
   let packages = dict.insert(packages, package.name, package)
-  case package {
-    GleamPackage(dependencies: dependencies, ..) -> {
-      list.try_fold(dependencies, packages, fn(packages, dependency) {
-        case set.contains(chain, dependency), dict.get(packages, dependency) {
-          True, _ -> Error(CircularDependencyError)
-          False, Ok(_) -> Ok(packages)
-          False, Error(_) -> {
-            result.map(
-              scan_packages(
-                project_name,
-                source_path,
-                dependency,
-                packages,
-                set.insert(chain, package.name),
-              ),
-              pair.second,
-            )
-          }
-        }
-      })
-    }
-    OtherPackage(..) -> Ok(packages)
+  let deps = case package {
+    GleamPackage(dependencies: dependencies, ..) -> dependencies
+    OtherPackage(..) -> []
   }
-  |> result.map(fn(packages) { #(package.name, packages) })
+  use deps <- result.map(
+    list.try_fold(deps, packages, fn(packages, dep) {
+      use <- bool.guard(dict.has_key(packages, dep), Ok(packages))
+      result.map(
+        scan_packages(project_name, source_path, dep, packages, io),
+        pair.second,
+      )
+    }),
+  )
+  #(package.name, deps)
 }
 
-pub fn scan_project(source_path: String, target: String) {
+pub fn scan_project(source_path: String, target: String, io: IOContext(e)) {
   use project_name <- result.try(
-    scan_package(source_path)
+    scan_package(source_path, io)
     |> result.try(fn(package) {
       case package {
         GleamPackage(name:, ..) -> Ok(name)
@@ -147,14 +137,9 @@ pub fn scan_project(source_path: String, target: String) {
     source_path,
     project_name,
     dict.new(),
-    set.new(),
+    io,
   ))
   Project(name:, source_path:, target:, packages:)
-}
-
-pub fn main() {
-  scan_project("../gl_example", "erlang")
-  |> pprint.debug
 }
 
 pub fn package_build_path(project: Project, package_name: String) -> String {
@@ -197,4 +182,17 @@ pub fn module_id(
       }
     _ -> Error(Nil)
   }
+}
+
+pub fn dependency_graph(project: Project) -> Graph(String) {
+  #(
+    dict.keys(project.packages),
+    list.flat_map(dict.values(project.packages), fn(package) {
+      case package {
+        GleamPackage(name:, dependencies:, ..) ->
+          list.map(dependencies, fn(dep) { #(name, dep) })
+        OtherPackage(..) -> []
+      }
+    }),
+  )
 }

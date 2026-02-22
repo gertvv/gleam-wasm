@@ -5,14 +5,11 @@ import gleam/set.{type Set}
 pub type Graph(node) =
   #(List(node), List(#(node, node)))
 
-pub fn squash_cycles(
-  nodes: List(node),
-  edges: List(#(node, node)),
-) -> Graph(List(node)) {
+pub fn squash_cycles(graph: Graph(node)) -> Graph(List(node)) {
+  let #(nodes, edges) = graph
   let nodes = list.map(nodes, fn(node) { [node] })
   let edges =
-    edges
-    |> list.map(fn(edge) {
+    list.map(edges, fn(edge) {
       let #(a, b) = edge
       #([a], [b])
     })
@@ -61,7 +58,7 @@ fn squash_cycles_internal(
   }
 }
 
-pub fn detect_cycle(
+fn detect_cycle(
   edges: List(#(node, node)),
   sofar: List(node),
   next: node,
@@ -94,10 +91,8 @@ fn topological_sort_internal(remaining: List(#(node, Set(node))), sorted) {
   }
 }
 
-pub fn topological_sort(
-  nodes: List(node),
-  edges: List(#(node, node)),
-) -> Result(List(node), Nil) {
+pub fn topological_sort(graph: Graph(node)) -> Result(List(node), Nil) {
+  let #(nodes, edges) = graph
   let in_edges =
     list.map(nodes, fn(node) {
       let from_nodes =
