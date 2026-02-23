@@ -6,7 +6,6 @@ import gleam/dict.{type Dict}
 import gleam/list
 import gleam/pair
 import gleam/result
-import gleam/set.{type Set}
 import gleam/string
 import tom
 
@@ -24,7 +23,7 @@ pub type Package {
     name: String,
     source_path: String,
     dependencies: List(String),
-    modules: Set(String),
+    modules: List(String),
   )
   OtherPackage(name: String, source_path: String)
 }
@@ -86,7 +85,7 @@ fn scan_package(source_path: String, io: IOContext(e)) {
     True -> {
       use #(name, dependencies) <- result.try(parse_gleam_toml(source_path, io))
       use modules <- result.map(list_modules(source_path, io))
-      GleamPackage(name, source_path, dependencies, set.from_list(modules))
+      GleamPackage(name, source_path, dependencies, modules)
     }
     False -> {
       Ok(OtherPackage(filepath.base_name(source_path), source_path))
@@ -176,7 +175,7 @@ pub fn module_id(
 ) -> Result(ModuleId, Nil) {
   case dict.get(project.packages, package_name) {
     Ok(GleamPackage(modules: modules, ..)) ->
-      case set.contains(modules, path) {
+      case list.contains(modules, path) {
         True -> Ok(ModuleId(package_name, path))
         False -> Error(Nil)
       }

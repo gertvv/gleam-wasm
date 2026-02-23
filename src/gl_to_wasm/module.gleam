@@ -5,7 +5,6 @@ import glance
 import gleam/dict
 import gleam/list
 import gleam/result
-import gleam/set
 
 pub type Module {
   Module(
@@ -33,7 +32,7 @@ pub fn parse_package(
     |> result.replace_error(PackageNotFound(package_name)),
   )
   let modules = case package {
-    project.GleamPackage(modules:, ..) -> set.to_list(modules)
+    project.GleamPackage(modules:, ..) -> modules
     project.OtherPackage(..) -> []
   }
   list.try_map(modules, fn(module_name) {
