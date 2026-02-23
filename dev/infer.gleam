@@ -1,3 +1,4 @@
+import gig/core
 import gig/typed_ast
 import gl_to_wasm/graph
 import gl_to_wasm/io_context
@@ -10,6 +11,7 @@ import gleam/list
 import pprint
 import simplifile
 
+// TODO: I'd prefer "NonEmpty" to "Cons" but gig/core.lower_context expects "Cons"
 const prelude = "
   pub type Int
   pub type Float
@@ -22,7 +24,7 @@ const prelude = "
   pub type UtfCodepoint
   pub type List(e) {
     Empty
-    NonEmpty(e, List(e))
+    Cons(e, List(e))
   }
   pub type Result(a, b) {
     Ok(a)
@@ -67,10 +69,16 @@ pub fn main() {
       })
     })
 
-  let _ =
-    context.modules
-    |> dict.get("example")
-    |> pprint.debug
+  let assert Ok(gleam) = dict.get(context.modules, "gleam")
+  let assert Ok(module) = dict.get(context.modules, "example") |> pprint.debug
+  core.lower_module(
+    typed_ast.Context(
+      ..context,
+      modules: dict.from_list([#("example", module), #("gleam", gleam)]),
+    ),
+    module,
+  )
+  |> pprint.debug
 
   Nil
 }
@@ -108,8 +116,10 @@ fn filter_target(ast: glance.Module, target: String) -> glance.Module {
 fn get_targets(def: glance.Definition(a)) -> List(String) {
   list.filter_map(def.attributes, fn(attr) {
     case attr {
-      glance.Attribute(name: "target", arguments: [glance.Variable(_, target)]) ->
-        Ok(target)
+      glance.Attribute(
+        name: "target",
+        arguments: [glance.Variable(_, target), ..],
+      ) -> Ok(target)
       _ -> Error(Nil)
     }
   })
