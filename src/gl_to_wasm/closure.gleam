@@ -22,26 +22,27 @@ pub type Function {
   )
 }
 
+/// A closure takes additional parameters via its environment.
+/// In this representation, we pretend these are just automatically available,
+/// no upacking is done.
 pub type Closure {
   Closure(
     typ: core.Poly,
     id: String,
-    env: List(core.Parameter),
+    environment: List(core.Parameter),
     parameters: List(core.Parameter),
     body: Expr,
   )
 }
 
-// TODO: I wonder if the function/closure distinction should be maintained,
-// or instead every global function should (also) be a trivial closure, taking
-// Nil as its environment
 pub type Expr {
   Literal(typ: core.Type, value: core.LiteralKind)
   Local(typ: core.Type, name: String)
   Global(typ: core.Type, id: String)
-  BindClosure(typ: core.Type, id: String, environment: List(Expr))
-  CallGlobal(typ: core.Type, id: String, arguments: List(Expr))
-  CallClosure(typ: core.Type, closure: Expr, arguments: List(Expr))
+  /// Bind takes a true closure or a global function (or external) and binds its environment variables.
+  Bind(typ: core.Type, id: String, environment: List(Expr))
+  /// Calls a bound closure.
+  Call(typ: core.Type, closure: Expr, arguments: List(Expr))
   Op(typ: core.Type, op: core.Op, arguments: List(Expr))
   Let(typ: core.Type, name: String, value: Expr, body: Expr)
   If(typ: core.Type, condition: Expr, then: Expr, els: Expr)
@@ -72,25 +73,16 @@ fn lower_expr(module: Module, body: core.Exp) -> #(Module, Expr) {
     core.Global(typ:, id:) -> {
       case typ {
         core.FunctionType(..) -> {
-          #(module, BindClosure(typ:, id:, environment: []))
+          #(module, Bind(typ:, id:, environment: []))
         }
         _ -> #(module, Global(typ:, id:))
       }
     }
-    core.Fn(typ:, parameters:, body:) -> lower_fn(typ, parameters, body)
-    core.Call(typ:, function: core.Global(id:, ..), arguments:) -> {
-      let #(module, arguments) =
-        list.fold_right(arguments, #(module, []), fn(acc, arg) {
-          let #(module, args) = acc
-          let #(module, arg) = lower_expr(module, arg)
-          #(module, [arg, ..args])
-        })
-      #(module, CallGlobal(typ:, id:, arguments:))
-    }
+    core.Fn(typ:, parameters:, body:) -> lower_fn(module, typ, parameters, body)
     core.Call(typ:, function:, arguments:) -> {
       let #(module, function) = lower_expr(module, function)
       let #(module, arguments) = lower_exprs(module, arguments)
-      #(module, CallClosure(typ:, closure: function, arguments:))
+      #(module, Call(typ:, closure: function, arguments:))
     }
     core.Op(typ:, op:, arguments:) -> {
       let #(module, arguments) = lower_exprs(module, arguments)
@@ -123,16 +115,54 @@ fn lower_exprs(module: Module, exprs: List(core.Exp)) -> #(Module, List(Expr)) {
 }
 
 fn lower_fn(
+  module: Module,
   typ: core.Type,
   parameters: List(core.Parameter),
   body: core.Exp,
 ) -> #(Module, Expr) {
-  let env =
+  let environment =
     find_captures(list.map(parameters, fn(parameter) { parameter.name }), body)
 
-  // TODO: mint and bind a closure.
+  let #(module, body) = lower_expr(module, body)
 
-  todo
+  // TODO: generate a real unique ID
+  let id = "closure_X"
+
+  let closure =
+    Closure(
+      typ: core.Poly(find_type_vars(typ), typ),
+      id:,
+      environment:,
+      parameters:,
+      body:,
+    )
+
+  let module = Module(..module, closures: [closure, ..module.closures])
+
+  let expr =
+    Bind(
+      typ:,
+      id:,
+      environment: list.map(environment, fn(param) {
+        Local(param.typ, param.name)
+      }),
+    )
+
+  #(module, expr)
+}
+
+fn find_type_vars(typ: core.Type) -> List(Int) {
+  case typ {
+    core.NamedType(parameters:, ..) ->
+      list.fold(parameters, [], fn(acc, param) {
+        find_type_vars(param) |> list.append(acc) |> list.unique
+      })
+    core.FunctionType(parameters:, return:) ->
+      list.fold([return, ..parameters], [], fn(acc, param) {
+        find_type_vars(param) |> list.append(acc) |> list.unique
+      })
+    core.Unbound(id:) -> [id]
+  }
 }
 
 fn find_captures(locals: List(String), expr: core.Exp) -> List(core.Parameter) {

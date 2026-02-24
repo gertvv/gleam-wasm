@@ -1,5 +1,6 @@
 import gig/core
 import gig/typed_ast
+import gl_to_wasm/closure
 import gl_to_wasm/graph
 import gl_to_wasm/io_context
 import gl_to_wasm/module
@@ -71,14 +72,19 @@ pub fn main() {
 
   let assert Ok(gleam) = dict.get(context.modules, "gleam")
   let assert Ok(module) = dict.get(context.modules, "example") |> pprint.debug
-  core.lower_module(
-    typed_ast.Context(
-      ..context,
-      modules: dict.from_list([#("example", module), #("gleam", gleam)]),
-    ),
-    module,
-  )
-  |> pprint.debug
+  let core =
+    core.lower_module(
+      typed_ast.Context(
+        ..context,
+        modules: dict.from_list([#("example", module), #("gleam", gleam)]),
+      ),
+      module,
+    )
+    |> pprint.debug
+
+  let closure =
+    closure.lower_module(core)
+    |> pprint.debug
 
   Nil
 }
