@@ -100,7 +100,7 @@ pub const bit_array_type = wasm.Struct(
 
 pub const bit_array_index = 9
 
-/// Prelude type 8: Result
+/// Prelude type: Result
 pub const result_type = [
   wasm.SubOpen([], wasm.Struct(Some("gleam/Result"), [])),
   wasm.SubFinal(

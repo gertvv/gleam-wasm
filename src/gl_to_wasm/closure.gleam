@@ -49,7 +49,7 @@ pub type Expr {
   Panic(typ: core.Type, value: Expr)
 }
 
-pub fn lower_module(module: core.Context) -> Module {
+pub fn lower_module(module: core.Module) -> Module {
   let acc =
     Module(
       types: module.types,
@@ -151,7 +151,7 @@ fn lower_fn(
   #(module, expr)
 }
 
-fn find_type_vars(typ: core.Type) -> List(Int) {
+fn find_type_vars(typ: core.Type) -> List(core.TypeVarId) {
   case typ {
     core.NamedType(parameters:, ..) ->
       list.fold(parameters, [], fn(acc, param) {

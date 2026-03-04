@@ -1,6 +1,7 @@
 import gig/core
 import gig/typed_ast
 import gl_to_wasm/closure
+import gl_to_wasm/codegen
 import gl_to_wasm/graph
 import gl_to_wasm/io_context
 import gl_to_wasm/module
@@ -38,6 +39,13 @@ const prelude = "
 
 const target = "erlang"
 
+pub type Context {
+  Context(
+    interfaces: dict.Dict(String, typed_ast.ModuleInterface),
+    implementations: dict.Dict(String, core.Module),
+  )
+}
+
 pub fn main() {
   let io_ctx =
     io_context.IOContext(
@@ -51,10 +59,16 @@ pub fn main() {
   let assert Ok(pkgs) =
     project.dependency_graph(project) |> graph.topological_sort
 
-  let context = typed_ast.new_context()
   let assert Ok(prelude_parsed) = glance.module(prelude)
+  let assert Ok(prelude_checked) =
+    typed_ast.infer_module(dict.new(), prelude_parsed, "gleam")
+  let prelude_impl = core.lower_module(dict.new(), prelude_checked)
+
   let context =
-    typed_ast.infer_module(context, prelude_parsed, "gleam", prelude)
+    Context(
+      dict.from_list([#("gleam", typed_ast.interface(prelude_checked))]),
+      dict.from_list([#("gleam", prelude_impl)]),
+    )
 
   let context =
     list.fold(pkgs, context, fn(context, pkg) {
@@ -62,31 +76,40 @@ pub fn main() {
       let assert Ok(pkg) = module.parse_package(project, pkg, io_ctx)
       let g = module.import_graph(pkg)
       let assert Ok(sorted) = graph.topological_sort(g)
+      echo sorted
       list.fold(sorted, context, fn(context, module_id) {
-        let assert Ok(module.Module(ast:, source:, ..)) =
+        let assert Ok(module.Module(ast:, ..)) =
           list.find(pkg, fn(module) { module.module_id == module_id })
         let ast = filter_target(ast, target)
-        typed_ast.infer_module(context, ast, module_id.module_path, source)
+        let assert Ok(checked) =
+          typed_ast.infer_module(context.interfaces, ast, module_id.module_path)
+        let context = register_interface(context, checked)
+        let impl = core.lower_module(context.interfaces, checked)
+        register_implementation(context, checked.name, impl)
       })
     })
 
-  let assert Ok(gleam) = dict.get(context.modules, "gleam")
-  let assert Ok(module) = dict.get(context.modules, "example") |> pprint.debug
-  let core =
-    core.lower_module(
-      typed_ast.Context(
-        ..context,
-        modules: dict.from_list([#("example", module), #("gleam", gleam)]),
-      ),
-      module,
-    )
-    |> pprint.debug
+  let assert Ok(module) =
+    dict.get(context.implementations, "example") |> pprint.debug
 
   let closure =
-    closure.lower_module(core)
+    closure.lower_module(module)
     |> pprint.debug
 
+  codegen.codegen_module(context.interfaces, "example", closure)
+
   Nil
+}
+
+fn register_interface(c: Context, m: typed_ast.Module) {
+  Context(
+    ..c,
+    interfaces: dict.insert(c.interfaces, m.name, typed_ast.interface(m)),
+  )
+}
+
+fn register_implementation(c: Context, name: String, i: core.Module) -> Context {
+  Context(..c, implementations: dict.insert(c.implementations, name, i))
 }
 
 fn filter_target(ast: glance.Module, target: String) -> glance.Module {
