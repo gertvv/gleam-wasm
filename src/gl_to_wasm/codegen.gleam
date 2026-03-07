@@ -5,8 +5,9 @@ import gl_to_wasm/graph
 import gl_to_wasm/prelude
 import gl_wasm/wasm
 import gleam/dict.{type Dict}
+import gleam/int
 import gleam/list
-import gleam/option.{Some}
+import gleam/option.{None, Some}
 import gleam/result
 import gleam/set
 import gleam/string
@@ -15,9 +16,11 @@ import pprint
 type Context {
   Context(
     mb: wasm.ModuleBuilder,
+    fbs: List(wasm.CodeBuilder),
     types: Dict(TypeRef, Int),
     next_type_index: Int,
     interfaces: Dict(String, ModuleInterface),
+    functions: Dict(String, Int),
   )
 }
 
@@ -73,10 +76,177 @@ pub fn codegen_module(
       #(CustomTypeRef("Result"), prelude.result_index),
     ])
   let ctx =
-    Context(mb:, types:, next_type_index: prelude.next_index, interfaces:)
+    Context(
+      mb:,
+      fbs: [],
+      types:,
+      next_type_index: prelude.next_index,
+      interfaces:,
+      functions: dict.new(),
+    )
   use ctx <- result.try(register_types(ctx, module))
+  use ctx <- result.try(register_functions(ctx, module))
+  use ctx <- result.try(build_functions(ctx, module))
   echo ctx.mb
   todo
+}
+
+fn build_functions(
+  ctx: Context,
+  module: closure.Module,
+) -> Result(Context, Error) {
+  list.zip(module.functions, ctx.fbs)
+  |> list.try_fold(ctx, fn(ctx, build) {
+    let #(func, fb) = build
+    let local_env =
+      dict.from_list(
+        list.index_map(func.parameters, fn(param, idx) { #(param.name, idx) }),
+      )
+    use fb <- result.try(codegen_expr(fb, func.body, local_env, ctx))
+    use mb <- result.map(wasm.finalize_function(ctx.mb, fb))
+    Context(..ctx, mb:)
+  })
+  |> result.map_error(WasmError)
+}
+
+fn codegen_expr(
+  fb: wasm.CodeBuilder,
+  expr: closure.Expr,
+  local_env: Dict(String, Int),
+  ctx: Context,
+) -> Result(wasm.CodeBuilder, String) {
+  case expr {
+    closure.Literal(typ:, value:) -> {
+      case value {
+        // TODO: instead of creating a new struct, get the global
+        core.NilVal ->
+          wasm.add_instruction(fb, wasm.StructNew(prelude.nil_index))
+        core.Bool(value:) -> todo
+        core.Int(value:) -> {
+          use value <- result.try(
+            int.parse(value) |> result.replace_error("Invalid Int value"),
+          )
+          use value <- result.try(wasm.int64_signed(value))
+          use fb <- result.try(wasm.add_instruction(fb, wasm.I64Const(value)))
+          wasm.add_instruction(fb, wasm.StructNew(prelude.int_index))
+        }
+        core.Float(value:) -> todo
+        core.String(value:) -> todo
+        core.BitArray(size:) -> todo
+      }
+    }
+    closure.Local(name:, ..) -> {
+      let assert Ok(idx) = dict.get(local_env, name)
+      wasm.add_instruction(fb, wasm.LocalGet(idx))
+    }
+    closure.Global(typ:, id:) -> todo
+    closure.Bind(typ:, id:, environment:) -> {
+      // generate the environment
+      let assert Ok(e_type_idx) = todo
+      use fb <- result.try(
+        list.try_fold(environment, fb, fn(fb, arg) {
+          codegen_expr(fb, arg, local_env, ctx)
+        }),
+      )
+      use fb <- result.try(wasm.add_instruction(fb, wasm.StructNew(e_type_idx)))
+      // create the function reference
+      let assert Ok(f_idx) = dict.get(ctx.functions, id)
+      use fb <- result.try(wasm.add_instruction(fb, wasm.RefFunc(f_idx)))
+      // create the struct
+      let assert Ok(c_type_idx) = todo
+      wasm.add_instruction(fb, wasm.StructNew(c_type_idx))
+    }
+    closure.Call(typ:, closure:, arguments:) -> {
+      // TODO: the closure needs separate struct and func types!
+      // create a local
+      let assert Ok(c_type_idx) = dict.get(ctx.types, type_to_typeref(typ))
+      use #(fb, local_idx) <- result.try(wasm.add_local(
+        fb,
+        wasm.Ref(wasm.NonNull(wasm.ConcreteType(c_type_idx))),
+        None,
+      ))
+      // generate the closure struct and store it
+      use fb <- result.try(codegen_expr(fb, closure, local_env, ctx))
+      use fb <- result.try(wasm.add_instruction(fb, wasm.LocalSet(local_idx)))
+      // put the closure environment on the stack
+      use fb <- result.try(wasm.add_instruction(fb, wasm.LocalGet(local_idx)))
+      use fb <- result.try(wasm.add_instruction(
+        fb,
+        wasm.StructGet(c_type_idx, 0),
+      ))
+      // put the function parameters on the stack
+      use fb <- result.try(
+        list.try_fold(arguments, fb, fn(fb, arg) {
+          codegen_expr(fb, arg, local_env, ctx)
+        }),
+      )
+      // put the function itself on the stack
+      use fb <- result.try(wasm.add_instruction(fb, wasm.LocalGet(local_idx)))
+      use fb <- result.try(wasm.add_instruction(
+        fb,
+        wasm.StructGet(c_type_idx, 1),
+      ))
+      // call the function
+      let assert Ok(f_type_idx) = dict.get(ctx.types, todo)
+      wasm.add_instruction(fb, wasm.CallRef(f_type_idx))
+    }
+    closure.Op(typ:, op:, arguments:) -> {
+      case op {
+        core.FieldAccess(variant:, field:) -> todo
+        core.VariantCheck(variant:) -> todo
+      }
+    }
+    closure.Let(typ:, name:, value:, body:) -> {
+      // create a local
+      let assert Ok(type_idx) = dict.get(ctx.types, type_to_typeref(typ))
+      use #(fb, local_idx) <- result.try(wasm.add_local(
+        fb,
+        wasm.Ref(wasm.NonNull(wasm.ConcreteType(type_idx))),
+        Some(name),
+      ))
+      // generate the assigned value
+      use fb <- result.try(codegen_expr(fb, value, local_env, ctx))
+      // set the local
+      use fb <- result.try(wasm.add_instruction(fb, wasm.LocalSet(local_idx)))
+      let local_env = dict.insert(local_env, name, local_idx)
+      // generate the body
+      codegen_expr(fb, body, local_env, ctx)
+    }
+    closure.If(typ:, condition:, then:, els:) -> {
+      let assert Ok(type_idx) = dict.get(ctx.types, type_to_typeref(typ))
+      let bt =
+        wasm.BlockValue(wasm.Ref(wasm.NonNull(wasm.ConcreteType(type_idx))))
+      use fb <- result.try(codegen_expr(fb, condition, local_env, ctx))
+      use fb <- result.try(wasm.add_instruction(fb, wasm.If(bt)))
+      use fb <- result.try(codegen_expr(fb, then, local_env, ctx))
+      use fb <- result.try(wasm.add_instruction(fb, wasm.Else))
+      use fb <- result.try(codegen_expr(fb, els, local_env, ctx))
+      wasm.add_instruction(fb, wasm.End)
+    }
+    closure.Panic(typ:, value:) -> todo
+  }
+}
+
+fn register_functions(
+  ctx: Context,
+  module: closure.Module,
+) -> Result(Context, Error) {
+  // TODO: externals
+  use #(mb, fbs) <- result.map(
+    list.map(module.functions, fn(func) {
+      // TODO: add an environment param?
+      let closure.Function(typ:, id:, parameters:, ..) = func
+      let assert Ok(type_idx) = dict.get(ctx.types, type_to_typeref(typ.typ))
+      wasm.FunctionSignature(
+        type_idx,
+        Some(id),
+        Some(list.map(parameters, fn(param) { param.name })),
+      )
+    })
+    |> wasm.create_function_builders(ctx.mb, _)
+    |> result.map_error(WasmError),
+  )
+  Context(..ctx, mb:, fbs:)
 }
 
 // TODO: what kind of types do I need to generate at the WebAssembly level?
@@ -317,7 +487,7 @@ fn generate_function_type(
     wasm.SubFinal(
       super_types: [],
       definition: wasm.Func(
-        name: option.None,
+        name: None,
         params: list.map(params, ref_to_wasm_value_type(ctx, _)),
         result: [ref_to_wasm_value_type(ctx, return)],
       ),
