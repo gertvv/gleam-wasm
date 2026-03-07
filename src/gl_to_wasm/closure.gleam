@@ -2,6 +2,8 @@
 //// 
 
 import gig/core
+import gig/gen_names
+import gleam/int
 import gleam/list
 
 pub type Module {
@@ -26,8 +28,16 @@ pub type Function {
 /// In this representation, we pretend these are just automatically available,
 /// no upacking is done.
 pub type Closure {
+  // TODO: add c_typ, e_typ, f_typ
   Closure(
+    /// The closure's "virtual type" - i.e. the type of function it appears as
     typ: core.Poly,
+    /// The type being passed around representing the closure
+    c_typ: core.Type,
+    /// The type representing the closure's environment
+    e_typ: core.Type,
+    /// The function implementing the closure, taking the environment as its first argument
+    f_typ: core.Type,
     id: String,
     environment: List(core.Parameter),
     parameters: List(core.Parameter),
@@ -39,10 +49,12 @@ pub type Expr {
   Literal(typ: core.Type, value: core.LiteralKind)
   Local(typ: core.Type, name: String)
   Global(typ: core.Type, id: String)
-  /// Bind takes a true closure or a global function (or external) and binds its environment variables.
-  Bind(typ: core.Type, id: String, environment: List(Expr))
+  /// Bind takes a true closure and binds its environment variables.
+  BindClosure(typ: core.Type, id: String, environment: List(Expr))
   /// Calls a bound closure.
-  Call(typ: core.Type, closure: Expr, arguments: List(Expr))
+  CallClosure(typ: core.Type, closure: Expr, arguments: List(Expr))
+  /// Calls a global.
+  CallGlobal(typ: core.Type, id: String, arguments: List(Expr))
   Op(typ: core.Type, op: core.Op, arguments: List(Expr))
   Let(typ: core.Type, name: String, value: Expr, body: Expr)
   If(typ: core.Type, condition: Expr, then: Expr, els: Expr)
@@ -72,17 +84,23 @@ fn lower_expr(module: Module, body: core.Exp) -> #(Module, Expr) {
     core.Local(typ:, name:) -> #(module, Local(typ:, name:))
     core.Global(typ:, id:) -> {
       case typ {
-        core.FunctionType(..) -> {
-          #(module, Bind(typ:, id:, environment: []))
+        core.FunctionType(parameters:, return:) -> {
+          let #(module, id) =
+            generate_closure(module, typ, id, parameters, return)
+          #(module, BindClosure(typ:, id:, environment: []))
         }
         _ -> #(module, Global(typ:, id:))
       }
     }
     core.Fn(typ:, parameters:, body:) -> lower_fn(module, typ, parameters, body)
+    core.Call(typ:, function: core.Global(id:, ..), arguments:) -> {
+      let #(module, arguments) = lower_exprs(module, arguments)
+      #(module, CallGlobal(typ:, id:, arguments:))
+    }
     core.Call(typ:, function:, arguments:) -> {
       let #(module, function) = lower_expr(module, function)
       let #(module, arguments) = lower_exprs(module, arguments)
-      #(module, Call(typ:, closure: function, arguments:))
+      #(module, CallClosure(typ:, closure: function, arguments:))
     }
     core.Op(typ:, op:, arguments:) -> {
       let #(module, arguments) = lower_exprs(module, arguments)
@@ -106,6 +124,42 @@ fn lower_expr(module: Module, body: core.Exp) -> #(Module, Expr) {
   }
 }
 
+fn generate_closure(
+  module: Module,
+  typ: core.Type,
+  id: String,
+  params: List(core.Type),
+  return: core.Type,
+) -> #(Module, String) {
+  let c_id = "$C_" <> id
+  let e_typ = core.NamedType("Nil", [])
+  let f_typ = core.FunctionType([e_typ, ..params], return)
+  let c_typ = core.NamedType(gen_names.get_tuple_id(2), [e_typ, f_typ])
+  let params =
+    list.index_map(params, fn(typ, idx) {
+      core.Parameter(typ:, name: "p" <> int.to_string(idx + 1))
+    })
+  let c =
+    Closure(
+      typ: core.Poly(find_type_vars(typ), typ),
+      c_typ:,
+      e_typ:,
+      f_typ:,
+      id: c_id,
+      environment: [],
+      parameters: [
+        core.Parameter(typ: core.NamedType("Nil", []), name: "env"),
+        ..params
+      ],
+      body: CallGlobal(
+        return,
+        id,
+        list.map(params, fn(param) { Local(param.typ, param.name) }),
+      ),
+    )
+  #(Module(..module, closures: [c, ..module.closures]), c_id)
+}
+
 fn lower_exprs(module: Module, exprs: List(core.Exp)) -> #(Module, List(Expr)) {
   list.fold_right(exprs, #(module, []), fn(acc, expr) {
     let #(module, exprs) = acc
@@ -122,15 +176,29 @@ fn lower_fn(
 ) -> #(Module, Expr) {
   let environment =
     find_captures(list.map(parameters, fn(parameter) { parameter.name }), body)
+  let e_typ =
+    core.NamedType(
+      gen_names.get_tuple_id(list.length(environment)),
+      list.map(environment, fn(arg) { arg.typ }),
+    )
+  let f_typ =
+    core.FunctionType(
+      [e_typ, ..list.map(parameters, fn(param) { param.typ })],
+      body.typ,
+    )
+  let c_typ = core.NamedType(gen_names.get_tuple_id(2), [e_typ, f_typ])
 
   let #(module, body) = lower_expr(module, body)
 
   // TODO: generate a real unique ID
-  let id = "closure_X"
+  let id = "closure_" <> int.to_string(list.length(module.closures))
 
   let closure =
     Closure(
       typ: core.Poly(find_type_vars(typ), typ),
+      c_typ:,
+      e_typ:,
+      f_typ:,
       id:,
       environment:,
       parameters:,
@@ -140,7 +208,7 @@ fn lower_fn(
   let module = Module(..module, closures: [closure, ..module.closures])
 
   let expr =
-    Bind(
+    BindClosure(
       typ:,
       id:,
       environment: list.map(environment, fn(param) {

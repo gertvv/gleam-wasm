@@ -1,4 +1,5 @@
 import gig/core
+import gig/gen_names
 import gig/typed_ast.{type ModuleInterface}
 import gl_to_wasm/closure
 import gl_to_wasm/graph
@@ -21,6 +22,7 @@ type Context {
     next_type_index: Int,
     interfaces: Dict(String, ModuleInterface),
     functions: Dict(String, Int),
+    module: closure.Module,
   )
 }
 
@@ -83,6 +85,7 @@ pub fn codegen_module(
       next_type_index: prelude.next_index,
       interfaces:,
       functions: dict.new(),
+      module:,
     )
   use ctx <- result.try(register_types(ctx, module))
   use ctx <- result.try(register_functions(ctx, module))
@@ -140,9 +143,12 @@ fn codegen_expr(
       wasm.add_instruction(fb, wasm.LocalGet(idx))
     }
     closure.Global(typ:, id:) -> todo
-    closure.Bind(typ:, id:, environment:) -> {
+    closure.BindClosure(typ:, id:, environment:) -> {
+      // get the closure
+      let assert Ok(c) =
+        list.find(ctx.module.closures, fn(closure) { closure.id == id })
       // generate the environment
-      let assert Ok(e_type_idx) = todo
+      let assert Ok(e_type_idx) = dict.get(ctx.types, type_to_typeref(c.e_typ))
       use fb <- result.try(
         list.try_fold(environment, fb, fn(fb, arg) {
           codegen_expr(fb, arg, local_env, ctx)
@@ -153,10 +159,19 @@ fn codegen_expr(
       let assert Ok(f_idx) = dict.get(ctx.functions, id)
       use fb <- result.try(wasm.add_instruction(fb, wasm.RefFunc(f_idx)))
       // create the struct
-      let assert Ok(c_type_idx) = todo
+      let assert Ok(c_type_idx) = dict.get(ctx.types, type_to_typeref(c.c_typ))
       wasm.add_instruction(fb, wasm.StructNew(c_type_idx))
     }
-    closure.Call(typ:, closure:, arguments:) -> {
+    closure.CallGlobal(id:, arguments:, ..) -> {
+      use fb <- result.try(
+        list.try_fold(arguments, fb, fn(fb, arg) {
+          codegen_expr(fb, arg, local_env, ctx)
+        }),
+      )
+      let assert Ok(f_idx) = dict.get(ctx.functions, id)
+      wasm.add_instruction(fb, wasm.Call(f_idx))
+    }
+    closure.CallClosure(typ:, closure:, arguments:) -> {
       // TODO: the closure needs separate struct and func types!
       // create a local
       let assert Ok(c_type_idx) = dict.get(ctx.types, type_to_typeref(typ))
@@ -246,6 +261,7 @@ fn register_functions(
     |> wasm.create_function_builders(ctx.mb, _)
     |> result.map_error(WasmError),
   )
+  // TODO: closures
   Context(..ctx, mb:, fbs:)
 }
 
@@ -387,18 +403,21 @@ fn list_expr_direct_type_references(expr: closure.Expr) -> List(TypeRef) {
     | closure.Local(typ:, ..)
     | closure.Global(typ:, ..)
     | closure.Panic(typ:, ..) -> [type_to_typeref(typ)]
-    closure.Bind(typ:, environment:, ..) ->
+    closure.BindClosure(typ:, environment:, ..) ->
       [type_to_typeref(typ)]
       |> list.append(list.flat_map(
         environment,
         list_expr_direct_type_references,
       ))
-    closure.Call(typ:, closure:, arguments:) ->
+    closure.CallClosure(typ:, closure:, arguments:) ->
       [type_to_typeref(typ)]
       |> list.append(list.flat_map(
         [closure, ..arguments],
         list_expr_direct_type_references,
       ))
+    closure.CallGlobal(typ:, arguments:, ..) ->
+      [type_to_typeref(typ)]
+      |> list.append(list.flat_map(arguments, list_expr_direct_type_references))
     closure.Op(typ:, arguments:, ..) ->
       [type_to_typeref(typ)]
       |> list.append(list.flat_map(arguments, list_expr_direct_type_references))
