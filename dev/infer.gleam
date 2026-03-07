@@ -90,7 +90,7 @@ pub fn main() {
     })
 
   let assert Ok(module) =
-    dict.get(context.implementations, "example") |> pprint.debug
+    dict.get(context.implementations, "gl_example") |> pprint.debug
 
   let closure =
     closure.lower_module(module)
