@@ -133,6 +133,8 @@ pub const result_type = [
 
 pub const result_index = 10
 
+pub const next_index = 13
+
 fn wrap(t) {
   [wasm.SubFinal([], t)]
 }

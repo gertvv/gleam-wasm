@@ -2,6 +2,7 @@ import gig/core
 import gig/typed_ast.{type ModuleInterface}
 import gl_to_wasm/closure
 import gl_to_wasm/graph
+import gl_to_wasm/prelude
 import gl_wasm/wasm
 import gleam/dict.{type Dict}
 import gleam/list
@@ -59,7 +60,20 @@ pub fn codegen_module(
   module: closure.Module,
 ) -> Result(wasm.ModuleBuilder, Error) {
   let mb = wasm.create_module_builder(Some(module_name))
-  let ctx = Context(mb:, types: dict.new(), next_type_index: 0, interfaces:)
+  let assert Ok(mb) = prelude.add_prelude_types(mb)
+  let types =
+    dict.from_list([
+      #(CustomTypeRef("Int"), prelude.int_index),
+      #(CustomTypeRef("Float"), prelude.float_index),
+      #(CustomTypeRef("Bool"), prelude.bool_index),
+      #(CustomTypeRef("Nil"), prelude.nil_index),
+      #(CustomTypeRef("List"), prelude.list_index),
+      #(CustomTypeRef("String"), prelude.string_index),
+      #(CustomTypeRef("BitArray"), prelude.bit_array_index),
+      #(CustomTypeRef("Result"), prelude.result_index),
+    ])
+  let ctx =
+    Context(mb:, types:, next_type_index: prelude.next_index, interfaces:)
   use ctx <- result.try(register_types(ctx, module))
   echo ctx.mb
   todo
@@ -79,8 +93,11 @@ fn register_types(
 ) -> Result(Context, Error) {
   let types = list_module_direct_type_references(module)
   let types =
-    list_indirect_type_references(types, ctx.interfaces) |> set.to_list
-  let graph = construct_type_graph(types, ctx.interfaces) |> pprint.debug
+    list_indirect_type_references(types, ctx.interfaces)
+    |> set.to_list
+    |> list.filter(fn(t) { !dict.has_key(ctx.types, t) })
+    |> pprint.debug
+  let graph = construct_type_graph(types, ctx.interfaces)
   let assert Ok(sorted) = graph.squash_cycles(graph) |> graph.topological_sort
   pprint.debug(sorted)
   use ctx <- result.try(list.try_fold(sorted, ctx, register_type_group))
@@ -290,6 +307,7 @@ fn register_type_group(
   Context(..ctx, mb:)
 }
 
+// TODO: make function parameters less specific (all (ref any) or closures)
 fn generate_function_type(
   ctx: Context,
   params: List(TypeRef),
