@@ -97,6 +97,7 @@ pub fn main() {
     |> pprint.debug
 
   codegen.codegen_module(context.interfaces, "example", closure)
+  |> echo
 
   Nil
 }

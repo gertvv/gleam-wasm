@@ -2,9 +2,12 @@
 //// 
 
 import gig/core
-import gig/gen_names
 import gleam/int
 import gleam/list
+
+// TODO: a Function should no longer have a core.Poly type.
+// We no longer pass around functions as values, only closures.
+// So any expression with a FunctionType is interpreted as yielding a closure.
 
 pub type Module {
   Module(
@@ -32,12 +35,6 @@ pub type Closure {
   Closure(
     /// The closure's "virtual type" - i.e. the type of function it appears as
     typ: core.Poly,
-    /// The type being passed around representing the closure
-    c_typ: core.Type,
-    /// The type representing the closure's environment
-    e_typ: core.Type,
-    /// The function implementing the closure, taking the environment as its first argument
-    f_typ: core.Type,
     id: String,
     environment: List(core.Parameter),
     parameters: List(core.Parameter),
@@ -45,6 +42,7 @@ pub type Closure {
   )
 }
 
+// TODO: specialize the core.Type, so we only 
 pub type Expr {
   Literal(typ: core.Type, value: core.LiteralKind)
   Local(typ: core.Type, name: String)
@@ -128,33 +126,24 @@ fn generate_closure(
   module: Module,
   typ: core.Type,
   id: String,
-  params: List(core.Type),
+  parameters: List(core.Type),
   return: core.Type,
 ) -> #(Module, String) {
   let c_id = "$C_" <> id
-  let e_typ = core.NamedType("Nil", [])
-  let f_typ = core.FunctionType([e_typ, ..params], return)
-  let c_typ = core.NamedType(gen_names.get_tuple_id(2), [e_typ, f_typ])
-  let params =
-    list.index_map(params, fn(typ, idx) {
+  let parameters =
+    list.index_map(parameters, fn(typ, idx) {
       core.Parameter(typ:, name: "p" <> int.to_string(idx + 1))
     })
   let c =
     Closure(
       typ: core.Poly(find_type_vars(typ), typ),
-      c_typ:,
-      e_typ:,
-      f_typ:,
       id: c_id,
       environment: [],
-      parameters: [
-        core.Parameter(typ: core.NamedType("Nil", []), name: "env"),
-        ..params
-      ],
+      parameters:,
       body: CallGlobal(
         return,
         id,
-        list.map(params, fn(param) { Local(param.typ, param.name) }),
+        list.map(parameters, fn(param) { Local(param.typ, param.name) }),
       ),
     )
   #(Module(..module, closures: [c, ..module.closures]), c_id)
@@ -176,29 +165,14 @@ fn lower_fn(
 ) -> #(Module, Expr) {
   let environment =
     find_captures(list.map(parameters, fn(parameter) { parameter.name }), body)
-  let e_typ =
-    core.NamedType(
-      gen_names.get_tuple_id(list.length(environment)),
-      list.map(environment, fn(arg) { arg.typ }),
-    )
-  let f_typ =
-    core.FunctionType(
-      [e_typ, ..list.map(parameters, fn(param) { param.typ })],
-      body.typ,
-    )
-  let c_typ = core.NamedType(gen_names.get_tuple_id(2), [e_typ, f_typ])
 
   let #(module, body) = lower_expr(module, body)
 
-  // TODO: generate a real unique ID
-  let id = "closure_" <> int.to_string(list.length(module.closures))
+  let id = "$closure_" <> int.to_string(list.length(module.closures))
 
   let closure =
     Closure(
       typ: core.Poly(find_type_vars(typ), typ),
-      c_typ:,
-      e_typ:,
-      f_typ:,
       id:,
       environment:,
       parameters:,

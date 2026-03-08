@@ -9,9 +9,11 @@ import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/pair
 import gleam/result
 import gleam/set
 import gleam/string
+import listx
 import pprint
 
 type Context {
@@ -40,6 +42,7 @@ pub type Error {
 // We need a type_group because example has sub-types that are self-referential,
 // and the function type references the struct type that references the function type.
 // Let i be the next available type index, and h the type index of String.
+// (TODO: the func is actually a closure, that hasn't been taken into account.)
 //
 // [
 //   wasm.SubOpen([], wasm.Struct(Some("Example"), [])),
@@ -58,6 +61,16 @@ pub type Error {
 //     wasm.Ref(wasm.NonNull(wasm.ConcreteType(h)))
 //   ]))
 // ]
+
+fn get_closure_representation(closure: closure.Closure) {
+  let assert core.FunctionType(parameters, return) = closure.typ.typ
+  let parameters = list.map(parameters, type_to_typeref)
+  let return = type_to_typeref(return)
+  let f_type = FunctionTypeRef([HoleTypeRef, ..parameters], return)
+  let c_type = tuple_ref(2)
+  let e_type = tuple_ref(list.length(closure.environment))
+  #(c_type, f_type, e_type)
+}
 
 pub fn codegen_module(
   interfaces: Dict(String, ModuleInterface),
@@ -88,6 +101,7 @@ pub fn codegen_module(
       module:,
     )
   use ctx <- result.try(register_types(ctx, module))
+  pprint.debug(ctx.types)
   use ctx <- result.try(register_functions(ctx, module))
   use ctx <- result.try(build_functions(ctx, module))
   echo ctx.mb
@@ -106,6 +120,14 @@ fn build_functions(
         list.index_map(func.parameters, fn(param, idx) { #(param.name, idx) }),
       )
     use fb <- result.try(codegen_expr(fb, func.body, local_env, ctx))
+    use fb <- result.try(
+      wasm.add_instruction(fb, wasm.End)
+      |> result.map_error(fn(err) {
+        echo "Generating function: " <> func.id
+        pprint.debug(fb)
+        echo err
+      }),
+    )
     use mb <- result.map(wasm.finalize_function(ctx.mb, fb))
     Context(..ctx, mb:)
   })
@@ -148,31 +170,38 @@ fn codegen_expr(
       let assert Ok(c) =
         list.find(ctx.module.closures, fn(closure) { closure.id == id })
       // generate the environment
-      let assert Ok(e_type_idx) = dict.get(ctx.types, type_to_typeref(c.e_typ))
+      let assert Ok(e_type_idx) =
+        dict.get(ctx.types, tuple_ref(list.length(c.environment)))
       use fb <- result.try(
         list.try_fold(environment, fb, fn(fb, arg) {
           codegen_expr(fb, arg, local_env, ctx)
         }),
       )
-      use fb <- result.try(wasm.add_instruction(fb, wasm.StructNew(e_type_idx)))
+      use fb <- result.try(wasm.add_instruction(
+        fb,
+        wasm.StructNew(e_type_idx + 1),
+      ))
       // create the function reference
       let assert Ok(f_idx) = dict.get(ctx.functions, id)
+        as { "Function not found: " <> id }
       use fb <- result.try(wasm.add_instruction(fb, wasm.RefFunc(f_idx)))
       // create the struct
-      let assert Ok(c_type_idx) = dict.get(ctx.types, type_to_typeref(c.c_typ))
-      wasm.add_instruction(fb, wasm.StructNew(c_type_idx))
+      let assert Ok(c_type_idx) = dict.get(ctx.types, tuple_ref(2))
+      wasm.add_instruction(fb, wasm.StructNew(c_type_idx + 1))
     }
     closure.CallGlobal(id:, arguments:, ..) -> {
+      echo "call global"
       use fb <- result.try(
         list.try_fold(arguments, fb, fn(fb, arg) {
           codegen_expr(fb, arg, local_env, ctx)
         }),
       )
+      echo "..."
       let assert Ok(f_idx) = dict.get(ctx.functions, id)
+      pprint.debug(fb)
       wasm.add_instruction(fb, wasm.Call(f_idx))
     }
     closure.CallClosure(typ:, closure:, arguments:) -> {
-      // TODO: the closure needs separate struct and func types!
       // create a local
       let assert Ok(c_type_idx) = dict.get(ctx.types, type_to_typeref(typ))
       use #(fb, local_idx) <- result.try(wasm.add_local(
@@ -213,10 +242,10 @@ fn codegen_expr(
     }
     closure.Let(typ:, name:, value:, body:) -> {
       // create a local
-      let assert Ok(type_idx) = dict.get(ctx.types, type_to_typeref(typ))
+      let assert Ok(wasm_type) = get_wasm_value_type(typ, ctx)
       use #(fb, local_idx) <- result.try(wasm.add_local(
         fb,
-        wasm.Ref(wasm.NonNull(wasm.ConcreteType(type_idx))),
+        wasm_type,
         Some(name),
       ))
       // generate the assigned value
@@ -228,9 +257,8 @@ fn codegen_expr(
       codegen_expr(fb, body, local_env, ctx)
     }
     closure.If(typ:, condition:, then:, els:) -> {
-      let assert Ok(type_idx) = dict.get(ctx.types, type_to_typeref(typ))
-      let bt =
-        wasm.BlockValue(wasm.Ref(wasm.NonNull(wasm.ConcreteType(type_idx))))
+      let assert Ok(wasm_type) = get_wasm_value_type(typ, ctx)
+      let bt = wasm.BlockValue(wasm_type)
       use fb <- result.try(codegen_expr(fb, condition, local_env, ctx))
       use fb <- result.try(wasm.add_instruction(fb, wasm.If(bt)))
       use fb <- result.try(codegen_expr(fb, then, local_env, ctx))
@@ -242,27 +270,67 @@ fn codegen_expr(
   }
 }
 
+fn get_wasm_value_type(
+  typ: core.Type,
+  ctx: Context,
+) -> Result(wasm.ValueType, Nil) {
+  case type_to_typeref(typ) {
+    HoleTypeRef -> Ok(wasm.Ref(wasm.NonNull(wasm.AbstractAny)))
+    ref ->
+      dict.get(ctx.types, ref)
+      |> result.map(fn(type_idx) {
+        wasm.Ref(wasm.NonNull(wasm.ConcreteType(type_idx)))
+      })
+  }
+}
+
+fn tuple_ref(size: Int) -> TypeRef {
+  CustomTypeRef("Tuple" <> int.to_string(size))
+}
+
 fn register_functions(
   ctx: Context,
   module: closure.Module,
 ) -> Result(Context, Error) {
   // TODO: externals
-  use #(mb, fbs) <- result.map(
+  let functions =
     list.map(module.functions, fn(func) {
-      // TODO: add an environment param?
-      let closure.Function(typ:, id:, parameters:, ..) = func
-      let assert Ok(type_idx) = dict.get(ctx.types, type_to_typeref(typ.typ))
-      wasm.FunctionSignature(
-        type_idx,
-        Some(id),
-        Some(list.map(parameters, fn(param) { param.name })),
+      let assert Ok(type_idx) =
+        dict.get(ctx.types, type_to_typeref(func.typ.typ))
+      #(
+        func.id,
+        wasm.FunctionSignature(
+          type_idx,
+          Some(func.id),
+          Some(list.map(func.parameters, fn(param) { param.name })),
+        ),
       )
     })
-    |> wasm.create_function_builders(ctx.mb, _)
+  let closures =
+    list.map(module.closures, fn(closure) {
+      let #(_c_type, f_type, _e_type) = get_closure_representation(closure)
+      let assert Ok(type_idx) = dict.get(ctx.types, f_type)
+      #(
+        closure.id,
+        wasm.FunctionSignature(
+          type_idx,
+          Some(closure.id),
+          Some([
+            "$env",
+            ..list.map(closure.parameters, fn(param) { param.name })
+          ]),
+        ),
+      )
+    })
+  let functions = list.append(functions, closures)
+  use #(mb, fbs) <- result.map(
+    wasm.create_function_builders(ctx.mb, list.map(functions, pair.second))
     |> result.map_error(WasmError),
   )
-  // TODO: closures
-  Context(..ctx, mb:, fbs:)
+  let functions =
+    list.index_map(functions, fn(func, idx) { #(func.0, idx) })
+    |> dict.from_list
+  Context(..ctx, mb:, fbs:, functions:)
 }
 
 // TODO: what kind of types do I need to generate at the WebAssembly level?
@@ -345,7 +413,7 @@ fn list_custom_type_type_references(
   name: String,
   interfaces: Dict(String, ModuleInterface),
 ) -> List(TypeRef) {
-  let assert Ok(t) = resolve_custom_type(interfaces, name)
+  let assert Ok(t) = resolve_custom_type(interfaces, name) as name
   list.flat_map(t.variants, fn(variant) {
     list.map(variant.fields, fn(field) { typed_ast_type_to_ref(field.item.typ) })
   })
@@ -358,7 +426,7 @@ fn typed_ast_type_to_ref(typ: typed_ast.Type) {
         "gleam" -> CustomTypeRef(name)
         _ -> todo
       }
-    typed_ast.TupleType(elements:) -> todo
+    typed_ast.TupleType(elements:) -> tuple_ref(list.length(elements))
     typed_ast.FunctionType(parameters:, return:) ->
       FunctionTypeRef(
         list.map(parameters, typed_ast_type_to_ref),
@@ -372,6 +440,46 @@ fn resolve_custom_type(interfaces: Dict(String, ModuleInterface), name: String) 
   // TODO: make this more complete
   let assert Ok(prelude) = dict.get(interfaces, core.builtin)
   list.find(prelude.custom_types, fn(t) { t.name == name })
+  |> result.try_recover(fn(_) {
+    // deal with tuples since we currently don't in lowering
+    case name {
+      "Tuple" <> size -> {
+        int.parse(size)
+        |> result.map(fn(size) {
+          let vars = list.map(list.range(1, size), typed_ast.TypeVarId)
+          let el_types = list.map(vars, typed_ast.VariableType)
+          let el_names =
+            list.map(listx.sane_range(size), gen_names.get_field_name(
+              "field",
+              _,
+            ))
+          let typ =
+            typed_ast.Poly(vars, typed_ast.NamedType("gleam", name, el_types))
+          let variant =
+            typed_ast.Variant(
+              typ:,
+              name:,
+              fields: list.map(list.zip(el_names, el_types), fn(el) {
+                let #(label, typ) = el
+                typed_ast.Field(
+                  label: Some(label),
+                  item: typed_ast.HoleAnno(typ, ""),
+                )
+              }),
+            )
+          typed_ast.CustomType(
+            typ:,
+            name:,
+            publicity: typed_ast.Private,
+            opaque_: False,
+            parameters: el_names,
+            variants: [variant],
+          )
+        })
+      }
+      _ -> Error(Nil)
+    }
+  })
 }
 
 fn list_module_direct_type_references(module: closure.Module) -> List(TypeRef) {
@@ -393,8 +501,15 @@ fn list_module_direct_type_references(module: closure.Module) -> List(TypeRef) {
       [type_to_typeref(func.typ.typ)]
       |> list.append(list_expr_direct_type_references(func.body))
     })
+  let from_closures =
+    list.flat_map(module.closures, fn(closure) {
+      let #(c_type, f_type, e_type) = get_closure_representation(closure)
+      [f_type, c_type, e_type]
+      |> list.append(list_expr_direct_type_references(closure.body))
+    })
   list.append(from_types, from_externals)
   |> list.append(from_functions)
+  |> list.append(from_closures)
 }
 
 fn list_expr_direct_type_references(expr: closure.Expr) -> List(TypeRef) {
@@ -403,12 +518,9 @@ fn list_expr_direct_type_references(expr: closure.Expr) -> List(TypeRef) {
     | closure.Local(typ:, ..)
     | closure.Global(typ:, ..)
     | closure.Panic(typ:, ..) -> [type_to_typeref(typ)]
-    closure.BindClosure(typ:, environment:, ..) ->
-      [type_to_typeref(typ)]
-      |> list.append(list.flat_map(
-        environment,
-        list_expr_direct_type_references,
-      ))
+    closure.BindClosure(..) ->
+      // All closure-related types are already listed at the signature level
+      []
     closure.CallClosure(typ:, closure:, arguments:) ->
       [type_to_typeref(typ)]
       |> list.append(list.flat_map(
@@ -507,8 +619,10 @@ fn generate_function_type(
       super_types: [],
       definition: wasm.Func(
         name: None,
-        params: list.map(params, ref_to_wasm_value_type(ctx, _)),
-        result: [ref_to_wasm_value_type(ctx, return)],
+        params: list.map(params, fn(_) {
+          wasm.Ref(wasm.NonNull(wasm.AbstractAny))
+        }),
+        result: [wasm.Ref(wasm.NonNull(wasm.AbstractAny))],
       ),
     ),
   ]
