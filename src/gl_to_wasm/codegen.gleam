@@ -62,14 +62,13 @@ pub type Error {
 //   ]))
 // ]
 
-fn get_closure_representation(closure: closure.Closure) {
-  let assert core.FunctionType(parameters, return) = closure.typ.typ
+fn get_closure_representation(parameters: List(core.Type), return: core.Type) {
   let parameters = list.map(parameters, type_to_typeref)
   let return = type_to_typeref(return)
   let f_type = FunctionTypeRef([HoleTypeRef, ..parameters], return)
   let c_type = tuple_ref(2)
-  let e_type = tuple_ref(list.length(closure.environment))
-  #(c_type, f_type, e_type)
+  // let e_type = tuple_ref(list.length(closure.environment))
+  #(c_type, f_type)
 }
 
 pub fn codegen_module(
@@ -201,9 +200,13 @@ fn codegen_expr(
       pprint.debug(fb)
       wasm.add_instruction(fb, wasm.Call(f_idx))
     }
-    closure.CallClosure(typ:, closure:, arguments:) -> {
+    closure.CallClosure(typ: _, closure:, arguments:) -> {
+      let assert core.FunctionType(parameters:, return:) = closure.typ
+      let #(c_type, f_type) = get_closure_representation(parameters, return)
       // create a local
-      let assert Ok(c_type_idx) = dict.get(ctx.types, type_to_typeref(typ))
+      let assert Ok(c_type_idx) = dict.get(ctx.types, c_type)
+      // TODO: don't do this for types with one variant!
+      let c_type_idx = c_type_idx + 1
       use #(fb, local_idx) <- result.try(wasm.add_local(
         fb,
         wasm.Ref(wasm.NonNull(wasm.ConcreteType(c_type_idx))),
@@ -211,6 +214,10 @@ fn codegen_expr(
       ))
       // generate the closure struct and store it
       use fb <- result.try(codegen_expr(fb, closure, local_env, ctx))
+      use fb <- result.try(wasm.add_instruction(
+        fb,
+        wasm.RefCast(wasm.NonNull(wasm.ConcreteType(c_type_idx))),
+      ))
       use fb <- result.try(wasm.add_instruction(fb, wasm.LocalSet(local_idx)))
       // put the closure environment on the stack
       use fb <- result.try(wasm.add_instruction(fb, wasm.LocalGet(local_idx)))
@@ -231,13 +238,44 @@ fn codegen_expr(
         wasm.StructGet(c_type_idx, 1),
       ))
       // call the function
-      let assert Ok(f_type_idx) = dict.get(ctx.types, todo)
+      let assert Ok(f_type_idx) = dict.get(ctx.types, f_type)
+        as string.inspect(f_type)
       wasm.add_instruction(fb, wasm.CallRef(f_type_idx))
     }
-    closure.Op(typ:, op:, arguments:) -> {
+    closure.Op(typ: _, op: core.VariantCheck(variant:) as op, arguments:)
+    | closure.Op(typ: _, op: core.FieldAccess(variant:, ..) as op, arguments:) -> {
+      let assert [arg] = arguments
+      let assert core.NamedType(id:, ..) = arg.typ
+      let assert Ok(custom_type) = resolve_custom_type(ctx.interfaces, id)
+      let assert Ok(#(variant, variant_idx)) =
+        list.index_map(custom_type.variants, fn(variant, idx) {
+          #(variant.name, #(variant, idx))
+        })
+        |> list.key_find(variant)
+      let assert Ok(idx) = dict.get(ctx.types, type_to_typeref(arg.typ))
+      use fb <- result.try(codegen_expr(fb, arg, local_env, ctx))
+      let variant_type_idx = idx + variant_idx + 1
+      let variant_wasm_type = wasm.NonNull(wasm.ConcreteType(variant_type_idx))
       case op {
-        core.FieldAccess(variant:, field:) -> todo
-        core.VariantCheck(variant:) -> todo
+        core.VariantCheck(..) -> {
+          wasm.add_instruction(fb, wasm.RefTest(variant_wasm_type))
+        }
+        core.FieldAccess(field:, ..) -> {
+          // TODO: lower the module interface and make this less awkward
+          let assert Ok(idx) =
+            list.index_map(variant.fields, fn(field, idx) {
+              #(
+                option.unwrap(field.label, gen_names.get_field_name("", idx)),
+                idx,
+              )
+            })
+            |> list.key_find(field)
+          use fb <- result.try(wasm.add_instruction(
+            fb,
+            wasm.RefCast(variant_wasm_type),
+          ))
+          wasm.add_instruction(fb, wasm.StructGet(variant_type_idx, idx))
+        }
       }
     }
     closure.Let(typ:, name:, value:, body:) -> {
@@ -308,7 +346,8 @@ fn register_functions(
     })
   let closures =
     list.map(module.closures, fn(closure) {
-      let #(_c_type, f_type, _e_type) = get_closure_representation(closure)
+      let assert core.FunctionType(parameters:, return:) = closure.typ.typ
+      let #(_c_type, f_type) = get_closure_representation(parameters, return)
       let assert Ok(type_idx) = dict.get(ctx.types, f_type)
       #(
         closure.id,
@@ -503,7 +542,9 @@ fn list_module_direct_type_references(module: closure.Module) -> List(TypeRef) {
     })
   let from_closures =
     list.flat_map(module.closures, fn(closure) {
-      let #(c_type, f_type, e_type) = get_closure_representation(closure)
+      let assert core.FunctionType(parameters:, return:) = closure.typ.typ
+      let #(c_type, f_type) = get_closure_representation(parameters, return)
+      let e_type = tuple_ref(list.length(closure.environment))
       [f_type, c_type, e_type]
       |> list.append(list_expr_direct_type_references(closure.body))
     })
