@@ -30,6 +30,7 @@ type Context {
 
 pub type Error {
   WasmError(String)
+  OtherError(String)
 }
 
 // For example how do we represent this type?
@@ -100,11 +101,94 @@ pub fn codegen_module(
       module:,
     )
   use ctx <- result.try(register_types(ctx, module))
-  pprint.debug(ctx.types)
+  use ctx <- result.try(register_imports(ctx, module))
   use ctx <- result.try(register_functions(ctx, module))
   use ctx <- result.try(build_functions(ctx, module))
   echo ctx.mb
   todo
+}
+
+fn register_imports(
+  ctx: Context,
+  module: closure.Module,
+) -> Result(Context, Error) {
+  // imports are any references globals that aren't from the local module
+  let imports =
+    list_module_used_globals(module)
+    |> list.filter(fn(id) {
+      !{
+        list.any(module.functions, fn(f) { f.id == id })
+        || list.any(module.closures, fn(c) { c.id == id })
+      }
+    })
+    |> list.unique
+  pprint.debug(imports)
+
+  // find the interface the import is from
+  use imports <- result.try(
+    list.try_map(imports, resolve_function(ctx.interfaces, _)),
+  )
+
+  use mb <- result.map(
+    list.try_fold(imports, ctx.mb, fn(mb, import_) {
+      // TODO: lower the interfaces!
+      let assert Ok(f_type_idx) =
+        dict.get(ctx.types, type_to_typeref(todo as "Lower module interface"))
+      wasm.import_function(
+        mb,
+        todo,
+        Some(import_.name),
+        wasm.ImportSource(core.builtin, import_.name),
+      )
+    })
+    |> result.map_error(WasmError),
+  )
+
+  Context(..ctx, mb: mb)
+}
+
+fn resolve_function(
+  interfaces: Dict(String, ModuleInterface),
+  id: String,
+) -> Result(typed_ast.FunctionDeclaration, Error) {
+  // TODO: also resolve from other modules
+  let assert Ok(prelude) = dict.get(interfaces, core.builtin)
+  list.find(prelude.functions, fn(f) { f.name == id })
+  |> result.replace_error(OtherError(
+    "Could not resolve imported function " <> id,
+  ))
+}
+
+fn list_module_used_globals(module: closure.Module) -> List(String) {
+  list.flat_map(module.functions, fn(f) { list_expr_used_globals(f.body) })
+  |> list.append(
+    list.flat_map(module.closures, fn(c) { list_expr_used_globals(c.body) }),
+  )
+}
+
+fn list_expr_used_globals(expr: closure.Expr) -> List(String) {
+  case expr {
+    closure.Literal(..) -> []
+    closure.Local(..) -> []
+    closure.Global(typ: _, id:) -> [id]
+    closure.BindClosure(typ: _, id:, environment:) -> [
+      id,
+      ..list.flat_map(environment, list_expr_used_globals)
+    ]
+    closure.CallClosure(typ: _, closure:, arguments:) ->
+      list.flat_map([closure, ..arguments], list_expr_used_globals)
+    closure.CallGlobal(typ: _, id:, arguments:) -> [
+      id,
+      ..list.flat_map(arguments, list_expr_used_globals)
+    ]
+    closure.Op(typ: _, op: _, arguments:) ->
+      list.flat_map(arguments, list_expr_used_globals)
+    closure.Let(typ: _, name: _, value:, body:) ->
+      list.flat_map([value, body], list_expr_used_globals)
+    closure.If(typ: _, condition:, then:, els:) ->
+      list.flat_map([condition, then, els], list_expr_used_globals)
+    closure.Panic(..) -> []
+  }
 }
 
 fn build_functions(
@@ -189,15 +273,12 @@ fn codegen_expr(
       wasm.add_instruction(fb, wasm.StructNew(c_type_idx + 1))
     }
     closure.CallGlobal(id:, arguments:, ..) -> {
-      echo "call global"
       use fb <- result.try(
         list.try_fold(arguments, fb, fn(fb, arg) {
           codegen_expr(fb, arg, local_env, ctx)
         }),
       )
-      echo "..."
       let assert Ok(f_idx) = dict.get(ctx.functions, id)
-      pprint.debug(fb)
       wasm.add_instruction(fb, wasm.Call(f_idx))
     }
     closure.CallClosure(typ: _, closure:, arguments:) -> {
@@ -240,6 +321,10 @@ fn codegen_expr(
       // call the function
       let assert Ok(f_type_idx) = dict.get(ctx.types, f_type)
         as string.inspect(f_type)
+      use fb <- result.try(wasm.add_instruction(
+        fb,
+        wasm.RefCast(wasm.NonNull(wasm.ConcreteType(f_type_idx))),
+      ))
       wasm.add_instruction(fb, wasm.CallRef(f_type_idx))
     }
     closure.Op(typ: _, op: core.VariantCheck(variant:) as op, arguments:)
@@ -304,7 +389,9 @@ fn codegen_expr(
       use fb <- result.try(codegen_expr(fb, els, local_env, ctx))
       wasm.add_instruction(fb, wasm.End)
     }
-    closure.Panic(typ:, value:) -> todo
+    closure.Panic(typ:, value:) ->
+      // TODO: probably should use throw for this
+      wasm.add_instruction(fb, wasm.Unreachable)
   }
 }
 
@@ -384,15 +471,15 @@ fn register_types(
   ctx: Context,
   module: closure.Module,
 ) -> Result(Context, Error) {
+  // TODO: because we want to erase types from function signatures, we can't just generate the
+  // types as if they were one-to-one with the gleam types.
   let types = list_module_direct_type_references(module)
   let types =
     list_indirect_type_references(types, ctx.interfaces)
     |> set.to_list
     |> list.filter(fn(t) { !dict.has_key(ctx.types, t) })
-    |> pprint.debug
   let graph = construct_type_graph(types, ctx.interfaces)
   let assert Ok(sorted) = graph.squash_cycles(graph) |> graph.topological_sort
-  pprint.debug(sorted)
   use ctx <- result.try(list.try_fold(sorted, ctx, register_type_group))
   Ok(ctx)
 }
@@ -563,7 +650,11 @@ fn list_expr_direct_type_references(expr: closure.Expr) -> List(TypeRef) {
       // All closure-related types are already listed at the signature level
       []
     closure.CallClosure(typ:, closure:, arguments:) ->
-      [type_to_typeref(typ)]
+      {
+        let assert core.FunctionType(parameters:, return:) = closure.typ
+        let #(c_type, f_type) = get_closure_representation(parameters, return)
+        [c_type, f_type, type_to_typeref(typ)]
+      }
       |> list.append(list.flat_map(
         [closure, ..arguments],
         list_expr_direct_type_references,
@@ -649,7 +740,6 @@ fn register_type_group(
   Context(..ctx, mb:)
 }
 
-// TODO: make function parameters less specific (all (ref any) or closures)
 fn generate_function_type(
   ctx: Context,
   params: List(TypeRef),

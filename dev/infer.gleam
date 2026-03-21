@@ -35,6 +35,9 @@ const prelude = "
   pub type Nil {
     Nil
   }
+
+  @external(erlang, \"gleam\", \"add_int\")
+  pub fn add_int(a: Int, b: Int) -> Int
 "
 
 const target = "erlang"
