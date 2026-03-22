@@ -6,10 +6,12 @@ import gl_to_wasm/graph
 import gl_to_wasm/io_context
 import gl_to_wasm/module
 import gl_to_wasm/project
+import gl_wasm/wasm
 import glance
 import gleam/dict
 import gleam/io
 import gleam/list
+import gleam/result
 import pprint
 import simplifile
 
@@ -45,8 +47,23 @@ const target = "erlang"
 pub type Context {
   Context(
     interfaces: dict.Dict(String, typed_ast.ModuleInterface),
+    lowered_interfaces: dict.Dict(String, core.ModuleInterface),
     implementations: dict.Dict(String, core.Module),
   )
+}
+
+fn file_output_stream(fname) {
+  let output_stream =
+    wasm.OutputStream(
+      stream: fname,
+      write_bytes: fn(fname, bytes) {
+        simplifile.append_bits(fname, bytes)
+        |> result.replace(fname)
+      },
+      close: fn(fname) { Ok(fname) },
+    )
+  let _ = simplifile.write_bits(fname, <<>>)
+  output_stream
 }
 
 pub fn main() {
@@ -68,10 +85,9 @@ pub fn main() {
   let prelude_impl = core.lower_module(dict.new(), prelude_checked)
 
   let context =
-    Context(
-      dict.from_list([#("gleam", typed_ast.interface(prelude_checked))]),
-      dict.from_list([#("gleam", prelude_impl)]),
-    )
+    Context(dict.new(), dict.new(), dict.new())
+    |> register_interface(prelude_checked)
+    |> register_implementation("gleam", prelude_impl)
 
   let context =
     list.fold(pkgs, context, fn(context, pkg) {
@@ -79,28 +95,31 @@ pub fn main() {
       let assert Ok(pkg) = module.parse_package(project, pkg, io_ctx)
       let g = module.import_graph(pkg)
       let assert Ok(sorted) = graph.topological_sort(g)
-      echo sorted
       list.fold(sorted, context, fn(context, module_id) {
+        io.println("checking module: " <> module_id.module_path)
         let assert Ok(module.Module(ast:, ..)) =
           list.find(pkg, fn(module) { module.module_id == module_id })
         let ast = filter_target(ast, target)
         let assert Ok(checked) =
           typed_ast.infer_module(context.interfaces, ast, module_id.module_path)
         let context = register_interface(context, checked)
-        let impl = core.lower_module(context.interfaces, checked)
+        // TODO: in fact need to lower interface before lowering implementation
+        let impl = core.lower_module(context.lowered_interfaces, checked)
         register_implementation(context, checked.name, impl)
       })
     })
 
-  let assert Ok(module) =
-    dict.get(context.implementations, "gl_example") |> pprint.debug
+  let assert Ok(module) = dict.get(context.implementations, "gl_example")
 
-  let closure =
-    closure.lower_module(module)
-    |> pprint.debug
+  let closure = closure.lower_module(module)
 
-  codegen.codegen_module(context.interfaces, "example", closure)
-  |> echo
+  let assert Ok(mb) =
+    codegen.codegen_module(context.lowered_interfaces, "example", closure)
+
+  pprint.debug(mb)
+
+  let output_stream = file_output_stream("gl_example.wasm")
+  let assert Ok(_) = wasm.emit_module(mb, output_stream)
 
   Nil
 }
@@ -113,7 +132,15 @@ fn register_interface(c: Context, m: typed_ast.Module) {
 }
 
 fn register_implementation(c: Context, name: String, i: core.Module) -> Context {
-  Context(..c, implementations: dict.insert(c.implementations, name, i))
+  Context(
+    ..c,
+    lowered_interfaces: dict.insert(
+      c.lowered_interfaces,
+      name,
+      core.interface(i),
+    ),
+    implementations: dict.insert(c.implementations, name, i),
+  )
 }
 
 fn filter_target(ast: glance.Module, target: String) -> glance.Module {

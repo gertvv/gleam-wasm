@@ -1,10 +1,11 @@
-import gig/core
+import gig/core.{type ModuleInterface}
 import gig/gen_names
-import gig/typed_ast.{type ModuleInterface}
+import gig/typed_ast
 import gl_to_wasm/closure
 import gl_to_wasm/graph
 import gl_to_wasm/prelude
 import gl_wasm/wasm
+import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
@@ -103,9 +104,8 @@ pub fn codegen_module(
   use ctx <- result.try(register_types(ctx, module))
   use ctx <- result.try(register_imports(ctx, module))
   use ctx <- result.try(register_functions(ctx, module))
-  use ctx <- result.try(build_functions(ctx, module))
-  echo ctx.mb
-  todo
+  use ctx <- result.map(build_functions(ctx, module))
+  ctx.mb
 }
 
 fn register_imports(
@@ -131,29 +131,31 @@ fn register_imports(
 
   use mb <- result.map(
     list.try_fold(imports, ctx.mb, fn(mb, import_) {
-      // TODO: lower the interfaces!
       let assert Ok(f_type_idx) =
-        dict.get(ctx.types, type_to_typeref(todo as "Lower module interface"))
+        dict.get(ctx.types, type_to_typeref(import_.typ.typ))
       wasm.import_function(
         mb,
-        todo,
-        Some(import_.name),
-        wasm.ImportSource(core.builtin, import_.name),
+        f_type_idx,
+        Some(import_.id),
+        // TODO: support non-prelude modules!
+        wasm.ImportSource(core.builtin, import_.id),
       )
     })
     |> result.map_error(WasmError),
   )
 
-  Context(..ctx, mb: mb)
+  let functions =
+    list.index_map(imports, fn(i, idx) { #(i.id, idx) }) |> dict.from_list
+  Context(..ctx, mb:, functions:)
 }
 
 fn resolve_function(
   interfaces: Dict(String, ModuleInterface),
   id: String,
-) -> Result(typed_ast.FunctionDeclaration, Error) {
+) -> Result(core.FunctionDeclaration, Error) {
   // TODO: also resolve from other modules
   let assert Ok(prelude) = dict.get(interfaces, core.builtin)
-  list.find(prelude.functions, fn(f) { f.name == id })
+  list.find(prelude.functions, fn(f) { f.id == id })
   |> result.replace_error(OtherError(
     "Could not resolve imported function " <> id,
   ))
@@ -203,14 +205,7 @@ fn build_functions(
         list.index_map(func.parameters, fn(param, idx) { #(param.name, idx) }),
       )
     use fb <- result.try(codegen_expr(fb, func.body, local_env, ctx))
-    use fb <- result.try(
-      wasm.add_instruction(fb, wasm.End)
-      |> result.map_error(fn(err) {
-        echo "Generating function: " <> func.id
-        pprint.debug(fb)
-        echo err
-      }),
-    )
+    use fb <- result.try(wasm.add_instruction(fb, wasm.End))
     use mb <- result.map(wasm.finalize_function(ctx.mb, fb))
     Context(..ctx, mb:)
   })
@@ -224,12 +219,20 @@ fn codegen_expr(
   ctx: Context,
 ) -> Result(wasm.CodeBuilder, String) {
   case expr {
-    closure.Literal(typ:, value:) -> {
+    closure.Literal(typ: _, value:) -> {
       case value {
         // TODO: instead of creating a new struct, get the global
         core.NilVal ->
           wasm.add_instruction(fb, wasm.StructNew(prelude.nil_index))
-        core.Bool(value:) -> todo
+        core.Bool(value:) -> {
+          let value = case value {
+            "True" -> 1
+            _ -> 0
+          }
+          use value <- result.try(wasm.int32_unsigned(value))
+          use fb <- result.try(wasm.add_instruction(fb, wasm.I32Const(value)))
+          wasm.add_instruction(fb, wasm.StructNew(prelude.bool_index))
+        }
         core.Int(value:) -> {
           use value <- result.try(
             int.parse(value) |> result.replace_error("Invalid Int value"),
@@ -238,17 +241,17 @@ fn codegen_expr(
           use fb <- result.try(wasm.add_instruction(fb, wasm.I64Const(value)))
           wasm.add_instruction(fb, wasm.StructNew(prelude.int_index))
         }
-        core.Float(value:) -> todo
-        core.String(value:) -> todo
-        core.BitArray(size:) -> todo
+        core.Float(value: _) -> todo as "Implement Float literal"
+        core.String(value: _) -> todo as "Implement String literal"
+        core.BitArray(size: _) -> todo as "Implement BitArray literal"
       }
     }
     closure.Local(name:, ..) -> {
       let assert Ok(idx) = dict.get(local_env, name)
       wasm.add_instruction(fb, wasm.LocalGet(idx))
     }
-    closure.Global(typ:, id:) -> todo
-    closure.BindClosure(typ:, id:, environment:) -> {
+    closure.Global(typ: _, id: _) -> todo as "Implement dereferencing globals"
+    closure.BindClosure(typ: _, id:, environment:) -> {
       // get the closure
       let assert Ok(c) =
         list.find(ctx.module.closures, fn(closure) { closure.id == id })
@@ -279,6 +282,7 @@ fn codegen_expr(
         }),
       )
       let assert Ok(f_idx) = dict.get(ctx.functions, id)
+        as { "Missing global function " <> id }
       wasm.add_instruction(fb, wasm.Call(f_idx))
     }
     closure.CallClosure(typ: _, closure:, arguments:) -> {
@@ -334,7 +338,7 @@ fn codegen_expr(
       let assert Ok(custom_type) = resolve_custom_type(ctx.interfaces, id)
       let assert Ok(#(variant, variant_idx)) =
         list.index_map(custom_type.variants, fn(variant, idx) {
-          #(variant.name, #(variant, idx))
+          #(variant.id, #(variant, idx))
         })
         |> list.key_find(variant)
       let assert Ok(idx) = dict.get(ctx.types, type_to_typeref(arg.typ))
@@ -348,12 +352,7 @@ fn codegen_expr(
         core.FieldAccess(field:, ..) -> {
           // TODO: lower the module interface and make this less awkward
           let assert Ok(idx) =
-            list.index_map(variant.fields, fn(field, idx) {
-              #(
-                option.unwrap(field.label, gen_names.get_field_name("", idx)),
-                idx,
-              )
-            })
+            list.index_map(variant.fields, fn(field, idx) { #(field.name, idx) })
             |> list.key_find(field)
           use fb <- result.try(wasm.add_instruction(
             fb,
@@ -389,7 +388,7 @@ fn codegen_expr(
       use fb <- result.try(codegen_expr(fb, els, local_env, ctx))
       wasm.add_instruction(fb, wasm.End)
     }
-    closure.Panic(typ:, value:) ->
+    closure.Panic(typ: _, value: _) ->
       // TODO: probably should use throw for this
       wasm.add_instruction(fb, wasm.Unreachable)
   }
@@ -453,9 +452,11 @@ fn register_functions(
     wasm.create_function_builders(ctx.mb, list.map(functions, pair.second))
     |> result.map_error(WasmError),
   )
+  let floor = dict.size(ctx.functions)
   let functions =
-    list.index_map(functions, fn(func, idx) { #(func.0, idx) })
+    list.index_map(functions, fn(func, idx) { #(func.0, floor + idx) })
     |> dict.from_list
+    |> dict.merge(ctx.functions, _)
   Context(..ctx, mb:, fbs:, functions:)
 }
 
@@ -541,66 +542,39 @@ fn list_custom_type_type_references(
 ) -> List(TypeRef) {
   let assert Ok(t) = resolve_custom_type(interfaces, name) as name
   list.flat_map(t.variants, fn(variant) {
-    list.map(variant.fields, fn(field) { typed_ast_type_to_ref(field.item.typ) })
+    list.map(variant.fields, fn(field) { type_to_typeref(field.typ) })
   })
 }
 
-fn typed_ast_type_to_ref(typ: typed_ast.Type) {
-  case typ {
-    typed_ast.NamedType(module:, name:, parameters:) ->
-      case module {
-        "gleam" -> CustomTypeRef(name)
-        _ -> todo
-      }
-    typed_ast.TupleType(elements:) -> tuple_ref(list.length(elements))
-    typed_ast.FunctionType(parameters:, return:) ->
-      FunctionTypeRef(
-        list.map(parameters, typed_ast_type_to_ref),
-        typed_ast_type_to_ref(return),
-      )
-    typed_ast.VariableType(..) -> HoleTypeRef
-  }
-}
-
-fn resolve_custom_type(interfaces: Dict(String, ModuleInterface), name: String) {
+fn resolve_custom_type(interfaces: Dict(String, ModuleInterface), id: String) {
   // TODO: make this more complete
   let assert Ok(prelude) = dict.get(interfaces, core.builtin)
-  list.find(prelude.custom_types, fn(t) { t.name == name })
+  list.find(prelude.types, fn(t) { t.id == id })
   |> result.try_recover(fn(_) {
     // deal with tuples since we currently don't in lowering
-    case name {
+    case id {
       "Tuple" <> size -> {
         int.parse(size)
         |> result.map(fn(size) {
           let vars = list.map(list.range(1, size), typed_ast.TypeVarId)
-          let el_types = list.map(vars, typed_ast.VariableType)
+          let el_types = list.map(vars, core.Unbound)
           let el_names =
             list.map(listx.sane_range(size), gen_names.get_field_name(
               "field",
               _,
             ))
-          let typ =
-            typed_ast.Poly(vars, typed_ast.NamedType("gleam", name, el_types))
+          let typ = core.Poly(vars, core.NamedType(id, el_types))
           let variant =
-            typed_ast.Variant(
+            core.Variant(
               typ:,
-              name:,
+              id:,
+              display_name: id,
               fields: list.map(list.zip(el_names, el_types), fn(el) {
                 let #(label, typ) = el
-                typed_ast.Field(
-                  label: Some(label),
-                  item: typed_ast.HoleAnno(typ, ""),
-                )
+                core.Parameter(typ, label)
               }),
             )
-          typed_ast.CustomType(
-            typ:,
-            name:,
-            publicity: typed_ast.Private,
-            opaque_: False,
-            parameters: el_names,
-            variants: [variant],
-          )
+          core.CustomType(typ:, id:, display_name: id, variants: [variant])
         })
       }
       _ -> Error(Nil)
@@ -733,6 +707,10 @@ fn register_type_group(
       }
     })
 
+  // Don't create empty type groups
+  // (TODO: should only happen for [HoleTypeRef] -- don't create this group in the 1st place)
+  use <- bool.guard(wasm_types == [], Ok(ctx))
+
   use #(mb, _ids) <- result.map(
     wasm.add_sub_type_group(ctx.mb, wasm_types)
     |> result.map_error(WasmError),
@@ -765,19 +743,19 @@ fn generate_custom_type(ctx: Context, name: String) {
   let base =
     wasm.SubOpen(
       super_types: [],
-      definition: wasm.Struct(name: Some(t.name), field_types: []),
+      definition: wasm.Struct(name: Some(t.id), field_types: []),
     )
   let variants =
     list.map(t.variants, fn(v) {
       wasm.SubFinal(
         super_types: [base_idx],
         definition: wasm.Struct(
-          name: Some(v.name),
+          name: Some(v.id),
           field_types: list.map(v.fields, fn(field) {
-            typed_ast_type_to_ref(field.item.typ)
+            type_to_typeref(field.typ)
             |> ref_to_wasm_value_type(ctx, _)
             |> wasm.ValueType(
-              name: field.label,
+              name: Some(field.name),
               mutable: wasm.Immutable,
               value_type: _,
             )
