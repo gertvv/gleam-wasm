@@ -193,18 +193,74 @@ fn list_expr_used_globals(expr: closure.Expr) -> List(String) {
   }
 }
 
+type FunctionOrClosure {
+  Function(closure.Function)
+  Closure(closure.Closure)
+}
+
 fn build_functions(
   ctx: Context,
   module: closure.Module,
 ) -> Result(Context, Error) {
-  list.zip(module.functions, ctx.fbs)
+  // A wasm.CodeBuilder has been pre-registered for each function and closure.
+  list.zip(
+    list.append(
+      list.map(module.functions, Function),
+      list.map(module.closures, Closure),
+    ),
+    ctx.fbs,
+  )
   |> list.try_fold(ctx, fn(ctx, build) {
     let #(func, fb) = build
-    let local_env =
-      dict.from_list(
-        list.index_map(func.parameters, fn(param, idx) { #(param.name, idx) }),
+    // We treat global functions and closures uniformly.
+    //  - The environment tuple is added as a first parameter for closures.
+    //  - The environment properties are added as virtual parameters for closures.
+    // Both of these are empty for global functions.
+    let #(env, params, env_params, body) = case func {
+      Function(closure.Function(parameters:, body:, ..)) -> #(
+        [],
+        parameters,
+        [],
+        body,
       )
-    use fb <- result.try(codegen_expr(fb, func.body, local_env, ctx))
+      Closure(closure.Closure(parameters:, environment:, body:, ..)) -> #(
+        [core.Parameter(core.Unbound(typed_ast.TypeVarId(0)), "$env")],
+        parameters,
+        environment,
+        body,
+      )
+    }
+    // Both the real params and the virtual (environment) params are accessible from the body.
+    let base_idx = list.length(env)
+    let local_env =
+      list.append(params, env_params)
+      |> list.index_map(fn(param, idx) { #(param.name, idx + base_idx) })
+      |> dict.from_list
+    // The virtual (environment) params must be unpacked before we evaluate the body.
+    use fb <- result.try(
+      list.try_fold(env_params, fb, fn(fb, param) {
+        use #(fb, idx) <- result.try(wasm.add_local(
+          fb,
+          ref_to_wasm_value_type(ctx, type_to_typeref(param.typ)),
+          Some(param.name),
+        ))
+        let e_type = tuple_ref(list.length(env))
+        let assert Ok(e_idx) = dict.get(ctx.types, e_type)
+        use fb <- result.try(wasm.add_instruction(fb, wasm.LocalGet(0)))
+        use fb <- result.try(wasm.add_instruction(
+          fb,
+          wasm.RefCast(wasm.NonNull(wasm.ConcreteType(e_idx))),
+        ))
+        use fb <- result.try(wasm.add_instruction(
+          fb,
+          wasm.StructGet(e_idx, idx - 1),
+        ))
+        wasm.add_instruction(fb, wasm.LocalSet(idx))
+      }),
+    )
+    // Generate the body of the function.
+    use fb <- result.try(codegen_expr(fb, body, local_env, ctx))
+    // Close and finalize the function.
     use fb <- result.try(wasm.add_instruction(fb, wasm.End))
     use mb <- result.map(wasm.finalize_function(ctx.mb, fb))
     Context(..ctx, mb:)
