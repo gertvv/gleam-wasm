@@ -104,7 +104,8 @@ pub fn codegen_module(
   use ctx <- result.try(register_types(ctx, module))
   use ctx <- result.try(register_imports(ctx, module))
   use ctx <- result.try(register_functions(ctx, module))
-  use ctx <- result.map(build_functions(ctx, module))
+  use ctx <- result.try(build_functions(ctx, module))
+  use ctx <- result.map(register_exports(ctx, module))
   ctx.mb
 }
 
@@ -147,6 +148,33 @@ fn register_imports(
   let functions =
     list.index_map(imports, fn(i, idx) { #(i.id, idx) }) |> dict.from_list
   Context(..ctx, mb:, functions:)
+}
+
+fn register_exports(
+  ctx: Context,
+  module: closure.Module,
+) -> Result(Context, Error) {
+  // TODO: we lack information on which functions are public
+  // TODO: we lack information on constants
+  // TODO: externals
+
+  // Imports occupy the lowest indices, so skip them.
+  let base_idx =
+    dict.size(ctx.functions)
+    - list.length(module.functions)
+    - list.length(module.closures)
+  use mb <- result.map(
+    list.try_fold(
+      list.index_map(module.functions, fn(f, i) { #(i, f) }),
+      ctx.mb,
+      fn(mb, function) {
+        let #(idx, function) = function
+        wasm.add_export(mb, wasm.ExportFunction(function.id, idx + base_idx))
+      },
+    )
+    |> result.map_error(WasmError),
+  )
+  Context(..ctx, mb:)
 }
 
 fn resolve_function(
