@@ -133,7 +133,25 @@ pub const result_type = [
 
 pub const result_index = 10
 
-pub const next_index = 13
+pub const closure_type = wasm.Struct(
+  Some("$Closure"),
+  [
+    wasm.ValueType(
+      Some("env"),
+      wasm.Immutable,
+      wasm.Ref(wasm.NonNull(wasm.AbstractAny)),
+    ),
+    wasm.ValueType(
+      Some("func"),
+      wasm.Immutable,
+      wasm.Ref(wasm.NonNull(wasm.AbstractFunc)),
+    ),
+  ],
+)
+
+pub const closure_index = 13
+
+pub const next_index = 14
 
 fn wrap(t) {
   [wasm.SubFinal([], t)]
@@ -155,6 +173,7 @@ pub fn add_prelude_types(
       wrap(string_type),
       wrap(bit_array_type),
       result_type,
+      wrap(closure_type),
     ],
     from: mb,
     with: fn(mb, t) {

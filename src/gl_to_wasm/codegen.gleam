@@ -15,7 +15,6 @@ import gleam/result
 import gleam/set
 import gleam/string
 import listx
-import pprint
 
 type Context {
   Context(
@@ -68,7 +67,7 @@ fn get_closure_representation(parameters: List(core.Type), return: core.Type) {
   let parameters = list.map(parameters, type_to_typeref)
   let return = type_to_typeref(return)
   let f_type = FunctionTypeRef([HoleTypeRef, ..parameters], return)
-  let c_type = tuple_ref(2)
+  let c_type = CustomTypeRef("$Closure")
   // let e_type = tuple_ref(list.length(closure.environment))
   #(c_type, f_type)
 }
@@ -90,6 +89,7 @@ pub fn codegen_module(
       #(CustomTypeRef("String"), prelude.string_index),
       #(CustomTypeRef("BitArray"), prelude.bit_array_index),
       #(CustomTypeRef("Result"), prelude.result_index),
+      #(CustomTypeRef("$Closure"), prelude.closure_index),
     ])
   let ctx =
     Context(
@@ -123,7 +123,6 @@ fn register_imports(
       }
     })
     |> list.unique
-  pprint.debug(imports)
 
   // find the interface the import is from
   use imports <- result.try(
@@ -356,8 +355,8 @@ fn codegen_expr(
         as { "Function not found: " <> id }
       use fb <- result.try(wasm.add_instruction(fb, wasm.RefFunc(f_idx)))
       // create the struct
-      let assert Ok(c_type_idx) = dict.get(ctx.types, tuple_ref(2))
-      wasm.add_instruction(fb, wasm.StructNew(c_type_idx + 1))
+      let c_type_idx = prelude.closure_index
+      wasm.add_instruction(fb, wasm.StructNew(c_type_idx))
     }
     closure.CallGlobal(id:, arguments:, ..) -> {
       use fb <- result.try(
@@ -374,8 +373,7 @@ fn codegen_expr(
       let #(c_type, f_type) = get_closure_representation(parameters, return)
       // create a local
       let assert Ok(c_type_idx) = dict.get(ctx.types, c_type)
-      // TODO: don't do this for types with one variant!
-      let c_type_idx = c_type_idx + 1
+      let c_type_idx = c_type_idx
       use #(fb, local_idx) <- result.try(wasm.add_local(
         fb,
         wasm.Ref(wasm.NonNull(wasm.ConcreteType(c_type_idx))),
@@ -660,6 +658,20 @@ fn resolve_custom_type(interfaces: Dict(String, ModuleInterface), id: String) {
             )
           core.CustomType(typ:, id:, display_name: id, variants: [variant])
         })
+      }
+      "$Closure" -> {
+        let v1 = typed_ast.TypeVarId(0)
+        let v2 = typed_ast.TypeVarId(1)
+        core.CustomType(
+          typ: core.Poly(
+            [v1, v2],
+            core.NamedType("$Closure", list.map([v1, v2], core.Unbound)),
+          ),
+          id:,
+          display_name: id,
+          variants: [],
+        )
+        |> Ok
       }
       _ -> Error(Nil)
     }
