@@ -67,16 +67,20 @@ fn get_closure_representation(parameters: List(core.Type), return: core.Type) {
   let parameters = list.map(parameters, type_to_typeref)
   let return = type_to_typeref(return)
   let f_type = FunctionTypeRef([HoleTypeRef, ..parameters], return)
-  let c_type = CustomTypeRef("$Closure")
   // let e_type = tuple_ref(list.length(closure.environment))
-  #(c_type, f_type)
+  f_type
 }
+
+const closure_id = "$Closure"
 
 pub fn codegen_module(
   interfaces: Dict(String, ModuleInterface),
   module_name: String,
   module: closure.Module,
 ) -> Result(wasm.ModuleBuilder, Error) {
+  // NOTE: this approach does not generate directly runnable WASM, because even though WASM uses
+  // structural typing, that doens't cross module boundaries. Unclear if it is worth pursuing this
+  // further.
   let mb = wasm.create_module_builder(Some(module_name))
   let assert Ok(mb) = prelude.add_prelude_types(mb)
   let types =
@@ -113,7 +117,7 @@ fn register_imports(
   ctx: Context,
   module: closure.Module,
 ) -> Result(Context, Error) {
-  // imports are any references globals that aren't from the local module
+  // imports are any referenced globals that aren't from the local module
   let imports =
     list_module_used_globals(module)
     |> list.filter(fn(id) {
@@ -370,27 +374,25 @@ fn codegen_expr(
     }
     closure.CallClosure(typ: _, closure:, arguments:) -> {
       let assert core.FunctionType(parameters:, return:) = closure.typ
-      let #(c_type, f_type) = get_closure_representation(parameters, return)
+      let f_type = get_closure_representation(parameters, return)
       // create a local
-      let assert Ok(c_type_idx) = dict.get(ctx.types, c_type)
-      let c_type_idx = c_type_idx
       use #(fb, local_idx) <- result.try(wasm.add_local(
         fb,
-        wasm.Ref(wasm.NonNull(wasm.ConcreteType(c_type_idx))),
+        wasm.Ref(wasm.NonNull(wasm.ConcreteType(prelude.closure_index))),
         None,
       ))
       // generate the closure struct and store it
       use fb <- result.try(codegen_expr(fb, closure, local_env, ctx))
       use fb <- result.try(wasm.add_instruction(
         fb,
-        wasm.RefCast(wasm.NonNull(wasm.ConcreteType(c_type_idx))),
+        wasm.RefCast(wasm.NonNull(wasm.ConcreteType(prelude.closure_index))),
       ))
       use fb <- result.try(wasm.add_instruction(fb, wasm.LocalSet(local_idx)))
       // put the closure environment on the stack
       use fb <- result.try(wasm.add_instruction(fb, wasm.LocalGet(local_idx)))
       use fb <- result.try(wasm.add_instruction(
         fb,
-        wasm.StructGet(c_type_idx, 0),
+        wasm.StructGet(prelude.closure_index, 0),
       ))
       // put the function parameters on the stack
       use fb <- result.try(
@@ -402,7 +404,7 @@ fn codegen_expr(
       use fb <- result.try(wasm.add_instruction(fb, wasm.LocalGet(local_idx)))
       use fb <- result.try(wasm.add_instruction(
         fb,
-        wasm.StructGet(c_type_idx, 1),
+        wasm.StructGet(prelude.closure_index, 1),
       ))
       // call the function
       let assert Ok(f_type_idx) = dict.get(ctx.types, f_type)
@@ -515,7 +517,7 @@ fn register_functions(
   let closures =
     list.map(module.closures, fn(closure) {
       let assert core.FunctionType(parameters:, return:) = closure.typ.typ
-      let #(_c_type, f_type) = get_closure_representation(parameters, return)
+      let f_type = get_closure_representation(parameters, return)
       let assert Ok(type_idx) = dict.get(ctx.types, f_type)
       #(
         closure.id,
@@ -530,7 +532,7 @@ fn register_functions(
       )
     })
   let functions = list.append(functions, closures)
-  use #(mb, fbs) <- result.map(
+  use #(mb, fbs) <- result.try(
     wasm.create_function_builders(ctx.mb, list.map(functions, pair.second))
     |> result.map_error(WasmError),
   )
@@ -539,7 +541,27 @@ fn register_functions(
     list.index_map(functions, fn(func, idx) { #(func.0, floor + idx) })
     |> dict.from_list
     |> dict.merge(ctx.functions, _)
-  Context(..ctx, mb:, fbs:, functions:)
+  let ctx = Context(..ctx, mb:, fbs:, functions:)
+  // Closures will be called by reference. For that, they will need to be declared outside the code
+  // section first. Ideally use an `(elem declare func $f)` but for now set a global. 
+  let floor = floor + list.length(module.functions)
+  use mb <- result.map(
+    list.index_map(closures, fn(closure, index) { #(index + floor, closure) })
+    |> list.try_fold(ctx.mb, fn(mb, closure) {
+      let #(f_idx, #(id, wasm.FunctionSignature(type_idx, ..))) = closure
+      use #(mb, gb) <- result.try(wasm.create_global_builder(
+        mb,
+        Some(id),
+        wasm.Immutable,
+        wasm.Ref(wasm.NonNull(wasm.ConcreteType(type_idx))),
+      ))
+      use gb <- result.try(wasm.add_instruction(gb, wasm.RefFunc(f_idx)))
+      use gb <- result.try(wasm.add_instruction(gb, wasm.End))
+      wasm.finalize_global(mb, gb)
+    })
+    |> result.map_error(WasmError),
+  )
+  Context(..ctx, mb:)
 }
 
 // TODO: what kind of types do I need to generate at the WebAssembly level?
@@ -659,13 +681,13 @@ fn resolve_custom_type(interfaces: Dict(String, ModuleInterface), id: String) {
           core.CustomType(typ:, id:, display_name: id, variants: [variant])
         })
       }
-      "$Closure" -> {
+      id if id == closure_id -> {
         let v1 = typed_ast.TypeVarId(0)
         let v2 = typed_ast.TypeVarId(1)
         core.CustomType(
           typ: core.Poly(
             [v1, v2],
-            core.NamedType("$Closure", list.map([v1, v2], core.Unbound)),
+            core.NamedType(id, list.map([v1, v2], core.Unbound)),
           ),
           id:,
           display_name: id,
@@ -700,9 +722,9 @@ fn list_module_direct_type_references(module: closure.Module) -> List(TypeRef) {
   let from_closures =
     list.flat_map(module.closures, fn(closure) {
       let assert core.FunctionType(parameters:, return:) = closure.typ.typ
-      let #(c_type, f_type) = get_closure_representation(parameters, return)
+      let f_type = get_closure_representation(parameters, return)
       let e_type = tuple_ref(list.length(closure.environment))
-      [f_type, c_type, e_type]
+      [f_type, CustomTypeRef(closure_id), e_type]
       |> list.append(list_expr_direct_type_references(closure.body))
     })
   list.append(from_types, from_externals)
@@ -722,8 +744,8 @@ fn list_expr_direct_type_references(expr: closure.Expr) -> List(TypeRef) {
     closure.CallClosure(typ:, closure:, arguments:) ->
       {
         let assert core.FunctionType(parameters:, return:) = closure.typ
-        let #(c_type, f_type) = get_closure_representation(parameters, return)
-        [c_type, f_type, type_to_typeref(typ)]
+        let f_type = get_closure_representation(parameters, return)
+        [CustomTypeRef(closure_id), f_type, type_to_typeref(typ)]
       }
       |> list.append(list.flat_map(
         [closure, ..arguments],

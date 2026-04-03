@@ -60,11 +60,24 @@
     local.get $result
     ref.test (ref $gleam/Result/Ok))
 
+  (func $add_int (param (ref any)) (param (ref any)) (result (ref any))
+    local.get 0
+    ref.cast (ref $gleam/Int)
+    struct.get $gleam/Int 0
+    local.get 1
+    ref.cast (ref $gleam/Int)
+    struct.get $gleam/Int 0
+    i64.add
+    struct.new $gleam/Int
+  )
+
   (export "gleam/Int" (func $gleam/Int))
   (export "gleam/Ok" (func $gleam/Ok))
   (export "gleam/Error" (func $gleam/Error))
   (export "gleam/Empty" (func $gleam/Empty))
   (export "gleam/NonEmpty" (func $gleam/NonEmpty))
+  (export "add_int" (func $add_int))
+  ;; These are just for testing
   (export "gleam/result/is_ok" (func $gleam/result/is_ok))
   (export "gleam/list/first" (func $gleam/list/first))
 )

@@ -26,4 +26,18 @@ load('custom.wasm').then(gleamModule => {
   console.log(g['gleam/result/is_ok'](g['gleam/Error'](i)));
   console.log(g['gleam/result/is_ok'](g['gleam/list/first'](g['gleam/NonEmpty'](g['gleam/Empty'](), i))));
   console.log(g['gleam/result/is_ok'](g['gleam/list/first'](g['gleam/Empty']())));
+
+  load('gl_example.wasm', {
+    gleam: gleamModule.instance.exports
+  }).then(exampleModule => {
+    const { gl_example_sum } = exampleModule.instance.exports;
+    const list = g['gleam/NonEmpty'](
+      g['gleam/NonEmpty'](
+        g['gleam/Empty'](),
+        g['gleam/Int'](BigInt(41)),
+      ),
+      g['gleam/Int'](BigInt(1)),
+    );
+    console.log(gl_example_sum(list));
+  })
 });
