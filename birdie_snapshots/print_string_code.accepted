@@ -1,0 +1,38 @@
+---
+version: 1.5.5
+title: print_string code
+file: ./test/gl_to_wasm/codegen_test.gleam
+test_name: codegen_hello_world_test
+---
+(func (type 5)
+  (local (ref 0))
+  (local i32)
+  (local i32)
+  local.get 0
+  struct.get 3 0
+  local.set 2
+  local.get 0
+  struct.get 3 1
+  local.set 1
+  block
+  loop
+  local.get 3
+  local.get 2
+  i32.ge_u
+  br_if 1
+  local.get 3
+  local.get 1
+  local.get 3
+  array.get_s 0
+  i32.store8 offset=0 align=0
+  local.get 3
+  i32.const 1
+  i32.add
+  local.set 3
+  br 0
+  end
+  end
+  i32.const 0
+  local.get 2
+  call 0
+  struct.new 2)

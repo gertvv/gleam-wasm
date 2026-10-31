@@ -1,0 +1,27 @@
+---
+version: 1.5.5
+title: hello_world echo__String code
+file: ./test/gl_to_wasm/codegen_test.gleam
+test_name: codegen_hello_world_test
+---
+(func (type 4)
+  (local (ref 0))
+  local.get 0
+  call 1
+  call 2
+  drop
+  i32.const 0
+  i32.const 1
+  array.new 0
+  local.set 1
+  local.get 1
+  i32.const 0
+  i32.const 13
+  i32.const 1
+  array.init_data 0 0
+  i32.const 1
+  local.get 1
+  struct.new 3
+  call 2
+  drop
+  local.get 0)

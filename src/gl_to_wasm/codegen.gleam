@@ -4,6 +4,7 @@ import gl_to_wasm/graph
 import gl_wasm/wasm
 import gleam/bit_array
 import gleam/bool
+import gleam/bytes_tree
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{None, Some}
@@ -40,6 +41,7 @@ type Context {
     next_type_index: Int,
     functions: Dict(String, Int),
     module: mono.Context,
+    strings: Dict(String, #(Int, Int)),
   )
 }
 
@@ -51,7 +53,6 @@ pub fn codegen(
   main_name: String,
 ) -> Result(wasm.ModuleBuilder, Snag) {
   let mb = wasm.create_module_builder(Some(module_name))
-  // let assert Ok(mb) = prelude.add_prelude_types(mb)
   let ctx =
     Context(
       mb:,
@@ -60,11 +61,13 @@ pub fn codegen(
       next_type_index: 0,
       functions: dict.new(),
       module:,
+      strings: dict.new(),
     )
   use ctx <- result.try(register_types(ctx) |> snag.context("register_types"))
   use ctx <- result.try(
     register_imports(ctx) |> snag.context("register_imports"),
   )
+  use ctx <- result.try(register_data(ctx))
   use ctx <- result.try(build_builtins(ctx) |> snag.context("build_builtins"))
   use ctx <- result.try(
     register_functions(ctx) |> snag.context("register_functions"),
@@ -73,6 +76,51 @@ pub fn codegen(
     build_functions(ctx, module) |> snag.context("build_functions"),
   )
   register_exports(ctx, module, main_name) |> snag.context("register_exports")
+}
+
+fn register_data(ctx: Context) -> Result(Context, Snag) {
+  let string_literals = find_string_literals(ctx.module)
+  let #(data, _, strings) =
+    list.fold(string_literals, #(bytes_tree.new(), 0, dict.new()), fn(acc, str) {
+      let assert Ok(str) = glexer.unescape_string(str)
+      let #(data, offset, index) = acc
+      use <- bool.guard(result.is_ok(dict.get(index, str)), acc)
+      let bytes = bit_array.from_string(str)
+      let size = bit_array.byte_size(bytes)
+      let data = bytes_tree.append(data, bytes)
+      #(data, offset + size, dict.insert(index, str, #(offset, size)))
+    })
+  use mb <- result.map(
+    wasm.add_passive_data(ctx.mb, bytes_tree.to_bit_array(data))
+    |> to_snag("wasm.add_passive_data"),
+  )
+  Context(..ctx, mb:, strings:)
+}
+
+fn find_string_literals(module: mono.Context) -> List(String) {
+  list.flat_map(module.functions, fn(func) {
+    find_string_literals_exp(func.body)
+  })
+}
+
+fn find_string_literals_exp(exp: mono.Exp) -> List(String) {
+  case exp {
+    mono.Literal(val: core.String(value:), ..) -> [value]
+    mono.Literal(..) -> []
+    mono.Local(..) -> []
+    mono.ConstantGlobal(..) -> []
+    mono.CallGlobal(args:, ..) -> list.flat_map(args, find_string_literals_exp)
+    mono.BindClosure(environment:, ..) ->
+      list.flat_map(environment, find_string_literals_exp)
+    mono.CallClosure(fun:, args:, ..) ->
+      list.flat_map([fun, ..args], find_string_literals_exp)
+    mono.Op(args:, ..) -> list.flat_map(args, find_string_literals_exp)
+    mono.Let(val:, exp:, ..) ->
+      list.flat_map([val, exp], find_string_literals_exp)
+    mono.If(cond:, then_exp:, else_exp:, ..) ->
+      list.flat_map([cond, then_exp, else_exp], find_string_literals_exp)
+    mono.Panic(value:, ..) -> find_string_literals_exp(value)
+  }
 }
 
 fn register_exports(
@@ -520,19 +568,20 @@ fn codegen_expr(
           core.Float(value: _) -> todo
           core.String(value:) -> {
             // TODO: String literals should be initialized form the data or element section
-            // TODO: escape codes need translating!
             let assert Ok(type_index) = dict.get(ctx.types, NamedType("String"))
             let assert Ok(value) = glexer.unescape_string(value)
-            let bytes = bit_array.from_string(value)
-            let assert Ok(size) =
-              wasm.int32_unsigned(bit_array.byte_size(bytes))
-            // first field of the struct
-            use fb <- result.try(
-              wasm.add_instruction(fb, wasm.I32Const(size))
-              |> to_snag("wasm.add_instruction(I32Const)"),
+            let assert Ok(#(offset, size)) = dict.get(ctx.strings, value)
+            let assert Ok(offset) = wasm.int32_unsigned(offset)
+            let assert Ok(size) = wasm.int32_unsigned(size)
+            use #(fb, bytes_idx) <- result.try(
+              wasm.add_local(
+                fb,
+                wasm.Ref(wasm.NonNull(wasm.ConcreteType(byte_array_index))),
+                Some("bytes"),
+              )
+              |> to_snag("wasm.add_local"),
             )
             let assert Ok(zero) = wasm.int32_unsigned(0)
-            // TODO: check these are provided in the right order
             use fb <- result.try(
               wasm.add_instruction(fb, wasm.I32Const(zero))
               |> to_snag("wasm.add_instruction(I32Const)"),
@@ -546,42 +595,39 @@ fn codegen_expr(
               wasm.add_instruction(fb, wasm.ArrayNew(byte_array_index))
               |> to_snag("wasm.add_instruction(ArrayNew)"),
             )
-            // >> TODO: the array should be initialized from somewhere else, not by code
-            use #(fb, bytes_idx) <- result.try(
-              wasm.add_local(
-                fb,
-                wasm.Ref(wasm.NonNull(wasm.ConcreteType(byte_array_index))),
-                Some("bytes"),
-              )
-              |> to_snag("wasm.add_local"),
-            )
             use fb <- result.try(
               wasm.add_instruction(fb, wasm.LocalSet(bytes_idx))
               |> to_snag("wasm.add_instruction(LocalSet)"),
             )
             use fb <- result.try(
-              bytes
-              |> bit_array_to_bytes
-              |> list.index_map(fn(byte, idx) { #(byte, idx) })
-              |> list.try_fold(fb, fn(fb, b) {
-                let #(byte, idx) = b
-                let assert Ok(idx) = wasm.int32_unsigned(idx)
-                let assert Ok(byte) = wasm.int32_unsigned(byte)
-                [
-                  wasm.LocalGet(bytes_idx),
-                  wasm.I32Const(idx),
-                  wasm.I32Const(byte),
-                  wasm.ArraySet(byte_array_index),
-                ]
-                |> list.try_fold(fb, wasm.add_instruction)
-              })
-              |> to_snag("Setting string bytes"),
+              wasm.add_instruction(fb, wasm.LocalGet(bytes_idx))
+              |> to_snag("wasm.add_instruction(LocalGet)"),
+            )
+            use fb <- result.try(
+              wasm.add_instruction(fb, wasm.I32Const(zero))
+              |> to_snag("wasm.add_instruction(I32Const)"),
+            )
+            use fb <- result.try(
+              wasm.add_instruction(fb, wasm.I32Const(offset))
+              |> to_snag("wasm.add_instruction(I32Const)"),
+            )
+            use fb <- result.try(
+              wasm.add_instruction(fb, wasm.I32Const(size))
+              |> to_snag("wasm.add_instruction(I32Const)"),
+            )
+            use fb <- result.try(
+              wasm.add_instruction(fb, wasm.ArrayInitData(byte_array_index, 0))
+              |> to_snag("wasm.add_instruction(ArrayInitData)"),
+            )
+            // create the String struct
+            use fb <- result.try(
+              wasm.add_instruction(fb, wasm.I32Const(size))
+              |> to_snag("wasm.add_instruction(I32Const)"),
             )
             use fb <- result.try(
               wasm.add_instruction(fb, wasm.LocalGet(bytes_idx))
               |> to_snag("wasm.add_instruction(LocalGet)"),
             )
-            // << END TODO
             wasm.add_instruction(fb, wasm.StructNew(type_index))
             |> to_snag("wasm.add_instruction(StructNew)")
           }
@@ -623,6 +669,16 @@ fn codegen_expr(
       }
       |> snag.context("CallClosure")
     mono.Op(typ: _, op: _, args: _) -> todo
+    mono.Let(typ: _, var: "_" <> _, val:, exp:) -> {
+      // we don't create and set locals for anonymous variables
+      use fb <- result.try(codegen_expr(fb, val, local_env, ctx))
+      use fb <- result.try(
+        wasm.add_instruction(fb, wasm.Drop)
+        |> to_snag("wasm.add_instruction(Drop)"),
+      )
+      // generate the body
+      codegen_expr(fb, exp, local_env, ctx)
+    }
     mono.Let(typ: _, var:, val:, exp:) ->
       {
         // create a local

@@ -2,7 +2,7 @@
 version: 1.5.5
 title: hello_world type graph
 file: ./test/gl_to_wasm/codegen_test.gleam
-test_name: type_graph_hello_world_test
+test_name: codegen_hello_world_test
 ---
 ---
 nodes:

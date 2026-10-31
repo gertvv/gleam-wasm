@@ -8,8 +8,9 @@ import gl_to_wasm/graph
 import gl_wasm/wasm
 import glance
 import glance_typed
-import gleam/dict
+import gleam/dict.{type Dict}
 import gleam/list
+import gleam/option
 import gleam/order
 import gleam/result
 import gleam/string
@@ -61,7 +62,7 @@ fn file_output_stream(fname) {
 }
 
 // Exercises function and external types depending on built-in types
-pub fn type_graph_hello_world_test() {
+pub fn codegen_hello_world_test() {
   let #(module, main) =
     mono_module_with_prelude(
       "hello",
@@ -78,9 +79,46 @@ pub fn type_graph_hello_world_test() {
   |> birdie.snap("hello_world type graph")
 
   let assert Ok(wasm) = codegen.codegen(module, "hello", "hello_main")
-  wasm.emit_module(wasm, file_output_stream("hello.wasm"))
+  let funcs = list_functions(wasm)
+
+  let assert Ok(print) = dict.get(funcs, "print_string")
+  wasm.function_to_string(print)
+  |> birdie.snap("print_string code")
+
+  let assert Ok(echo_) = dict.get(funcs, "echo__String")
+  wasm.function_to_string(echo_)
+  |> birdie.snap("hello_world echo__String code")
+
+  let assert Ok(main) = dict.get(funcs, "hello_main")
+  wasm.function_to_string(main)
+  |> birdie.snap("hello_world main code")
   // |> pprint.format
   // |> birdie.snap("hello_world types")
+  // 
+  wasm.emit_module(wasm, file_output_stream("hello.wasm"))
+}
+
+fn list_functions(
+  wasm: wasm.ModuleBuilder,
+) -> Dict(String, wasm.FunctionDefinition) {
+  do_list_functions(dict.new(), wasm, 0)
+}
+
+fn do_list_functions(
+  acc: Dict(String, wasm.FunctionDefinition),
+  wasm: wasm.ModuleBuilder,
+  idx: Int,
+) -> Dict(String, wasm.FunctionDefinition) {
+  case wasm.get_function_by_index(wasm, idx) {
+    Ok(def) -> {
+      case def.name {
+        option.Some(name) ->
+          do_list_functions(dict.insert(acc, name, def), wasm, idx + 1)
+        option.None -> do_list_functions(acc, wasm, idx + 1)
+      }
+    }
+    Error(_) -> acc
+  }
 }
 
 pub fn type_graph_type_recursion_test() {
