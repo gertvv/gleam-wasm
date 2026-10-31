@@ -1,0 +1,194 @@
+---
+version: 1.5.5
+title: closure mono
+file: ./test/gl_to_wasm/codegen_test.gleam
+test_name: type_graph_closure_test
+---
+---
+main: rec_main
+types:
+- name: Nil
+  untyped_name: Nil
+  display_name: Nil
+  variants:
+  - name: Nil
+    untyped_name: Nil
+    display_name: Nil
+    fields:
+functions:
+- name: rec_main
+  environment:
+  parameters:
+  return:
+    kind: NamedType
+    id: String
+    parameters:
+  body:
+    kind: Let
+    type:
+      kind: NamedType
+      id: String
+      parameters:
+    var: f
+    val:
+      kind: CallGlobal
+      type:
+        kind: FunctionType
+        parameters:
+        return:
+          kind: NamedType
+          id: String
+          parameters:
+      id: rec_sayer_String
+      args:
+      - kind: Literal
+        type:
+          kind: NamedType
+          id: String
+          parameters:
+        value: "String(Hello)"
+    exp:
+      kind: CallGlobal
+      type:
+        kind: NamedType
+        id: String
+        parameters:
+      id: echo__String
+      args:
+      - kind: CallClosure
+        type:
+          kind: NamedType
+          id: String
+          parameters:
+        fun:
+          kind: Local
+          type:
+            kind: FunctionType
+            parameters:
+            return:
+              kind: NamedType
+              id: String
+              parameters:
+          var: f
+        args:
+- name: echo__String
+  environment:
+  parameters:
+  - name: value
+    type:
+      kind: NamedType
+      id: String
+      parameters:
+  return:
+    kind: NamedType
+    id: String
+    parameters:
+  body:
+    kind: Let
+    type:
+      kind: NamedType
+      id: String
+      parameters:
+    var: _
+    val:
+      kind: CallGlobal
+      type:
+        kind: NamedType
+        id: Nil
+        parameters:
+      id: print_string
+      args:
+      - kind: CallGlobal
+        type:
+          kind: NamedType
+          id: String
+          parameters:
+        id: inspect_String
+        args:
+        - kind: Local
+          type:
+            kind: NamedType
+            id: String
+            parameters:
+          var: value
+    exp:
+      kind: Let
+      type:
+        kind: NamedType
+        id: String
+        parameters:
+      var: _V1
+      val:
+        kind: CallGlobal
+        type:
+          kind: NamedType
+          id: Nil
+          parameters:
+        id: print_string
+        args:
+        - kind: Literal
+          type:
+            kind: NamedType
+            id: String
+            parameters:
+          value: "String(\\n)"
+      exp:
+        kind: Local
+        type:
+          kind: NamedType
+          id: String
+          parameters:
+        var: value
+- name: rec_sayer_String
+  environment:
+  parameters:
+  - name: str
+    type:
+      kind: NamedType
+      id: String
+      parameters:
+  return:
+    kind: FunctionType
+    parameters:
+    return:
+      kind: NamedType
+      id: String
+      parameters:
+  body:
+    kind: BindClosure
+    type:
+      kind: FunctionType
+      parameters:
+      return:
+        kind: NamedType
+        id: String
+        parameters:
+    id: Closure_rec_0_String
+    environment:
+    - kind: Local
+      type:
+        kind: NamedType
+        id: String
+        parameters:
+      var: str
+- name: Closure_rec_0_String
+  environment:
+  - name: str
+    type:
+      kind: NamedType
+      id: String
+      parameters:
+  parameters:
+  return:
+    kind: NamedType
+    id: String
+    parameters:
+  body:
+    kind: Local
+    type:
+      kind: NamedType
+      id: String
+      parameters:
+    var: str
+externals:
+

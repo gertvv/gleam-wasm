@@ -1,0 +1,33 @@
+---
+version: 1.5.5
+title: hello_world type graph
+file: ./test/gl_to_wasm/codegen_test.gleam
+test_name: type_graph_hello_world_test
+---
+---
+nodes:
+- BitArray
+- Float
+- Int
+- Nil
+- "Nil/Nil"
+- String
+- UtfCodepoint
+- "fn() -> Nil/Nil"
+- "fn() -> String"
+- "fn(String) -> Nil"
+- "fn(String) -> String"
+edges:
+- a: "Nil/Nil"
+  b: Nil
+- a: "fn() -> Nil/Nil"
+  b: "Nil/Nil"
+- a: "fn() -> String"
+  b: String
+- a: "fn(String) -> Nil"
+  b: Nil
+- a: "fn(String) -> Nil"
+  b: String
+- a: "fn(String) -> String"
+  b: String
+

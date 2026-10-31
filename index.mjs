@@ -4,40 +4,23 @@ const load = (filename, imports) => {
   const wasmBuffer = fs.readFileSync(filename);
   return WebAssembly.instantiate(wasmBuffer, imports);
 }
-/*
-load('gleam.wasm').then(gleamModule => {
-  const gleam = gleamModule.instance.exports;
-  const { list_empty, list_non_empty, int_box } = gleamModule.instance.exports;
-  load('generated.wasm', { gleam }).then(exampleModule => {
-    const { sum } = exampleModule.instance.exports;
-    const list = list_non_empty(
-      int_box(BigInt(1)),
-      list_non_empty(
-        int_box(BigInt(41)),
-        list_empty()));
-    console.log(sum(list));
-  });
-});
-  */
-load('custom.wasm').then(gleamModule => {
-  const g = gleamModule.instance.exports;
-  const i = g['gleam/Int'](BigInt(1));
-  console.log(g['gleam/result/is_ok'](g['gleam/Ok'](i)));
-  console.log(g['gleam/result/is_ok'](g['gleam/Error'](i)));
-  console.log(g['gleam/result/is_ok'](g['gleam/list/first'](g['gleam/NonEmpty'](g['gleam/Empty'](), i))));
-  console.log(g['gleam/result/is_ok'](g['gleam/list/first'](g['gleam/Empty']())));
 
-  load('gl_example.wasm', {
-    gleam: gleamModule.instance.exports
-  }).then(exampleModule => {
-    const { gl_example_sum } = exampleModule.instance.exports;
-    const list = g['gleam/NonEmpty'](
-      g['gleam/NonEmpty'](
-        g['gleam/Empty'](),
-        g['gleam/Int'](BigInt(41)),
-      ),
-      g['gleam/Int'](BigInt(1)),
-    );
-    console.log(gl_example_sum(list));
-  })
-});
+let memory = null;
+let decoder = new TextDecoder();
+
+function print_string(offset, length) {
+  let bytes = new DataView(memory, offset, length);
+  let string = decoder.decode(bytes);
+  // console.log(`Got ${length} bytes to print: "${string}"`);
+  process.stdout.write(string);
+}
+
+load('hello.wasm', {
+  'host': {
+    'print': print_string
+  }
+}).then(module => {
+  const hello = module.instance.exports.hello_main;
+  memory = module.instance.exports.memory.buffer;
+  hello();
+})

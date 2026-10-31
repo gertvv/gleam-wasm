@@ -13,15 +13,17 @@ version = "1.0.0"
 # https://gleam.run/writing-gleam/gleam-toml/. 
 
 [dependencies]
-simplifile = "~> 2.0"
 filepath = ">= 1.0.0 and < 2.0.0"
 pprint = ">= 1.0.4 and < 2.0.0"
-gleam_stdlib = ">= 0.47.0 and < 0.68.0"
-gl_wasm = { path = "../gl_wasm" }
-gig = { path = "../gig" }
+gl_wasm = { git = "https://github.com/gertvv/gl_wasm.git", ref = "526bb1a538eef97156ef5e11b31c63c39447d3d4" }
+gig = { git = "https://github.com/gertvv/gig.git", ref = "c4b0c9c82bb13b9937e24c5ebbb256156e78514e" }
+glance_typed = { git = "https://github.com/schurhammer/glance_typed.git", ref = "e16b0a1a2ce5de07658b2f809b30e38cf3739457" }
 snag = ">= 1.1.0 and < 2.0.0"
 tom = ">= 2.0.1 and < 3.0.0"
-glance = ">= 5.0.1 and < 6.0.0"
+simplifile = ">= 2.7.0 and < 3.0.0"
+birdie = ">= 1.5.5 and < 2.0.0"
+gleam_stdlib = ">= 0.69.0 and < 1.0.0"
+cymbal = ">= 1.0.1 and < 2.0.0"
 
 [dev-dependencies]
 gleeunit = "~> 1.0"

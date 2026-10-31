@@ -1,0 +1,45 @@
+---
+version: 1.5.5
+title: rectype type graph
+file: ./test/gl_to_wasm/codegen_test.gleam
+test_name: type_graph_type_recursion_test
+---
+---
+nodes:
+- BitArray
+- Float
+- Int
+- String
+- UtfCodepoint
+- "fn() -> rec_Tree_String"
+- "fn(String) -> Nil"
+- "fn(String) -> String"
+- "fn(String) -> rec_Tree_String/rec_Leaf_String"
+- "fn(rec_Tree_String, rec_Tree_String) -> rec_Tree_String/rec_Branch_String"
+- rec_Tree_String
+- "rec_Tree_String/rec_Branch_String"
+- "rec_Tree_String/rec_Leaf_String"
+edges:
+- a: "fn() -> rec_Tree_String"
+  b: rec_Tree_String
+- a: "fn(String) -> Nil"
+  b: Nil
+- a: "fn(String) -> Nil"
+  b: String
+- a: "fn(String) -> String"
+  b: String
+- a: "fn(String) -> rec_Tree_String/rec_Leaf_String"
+  b: String
+- a: "fn(String) -> rec_Tree_String/rec_Leaf_String"
+  b: "rec_Tree_String/rec_Leaf_String"
+- a: "fn(rec_Tree_String, rec_Tree_String) -> rec_Tree_String/rec_Branch_String"
+  b: rec_Tree_String
+- a: "fn(rec_Tree_String, rec_Tree_String) -> rec_Tree_String/rec_Branch_String"
+  b: "rec_Tree_String/rec_Branch_String"
+- a: "rec_Tree_String/rec_Branch_String"
+  b: rec_Tree_String
+- a: "rec_Tree_String/rec_Leaf_String"
+  b: String
+- a: "rec_Tree_String/rec_Leaf_String"
+  b: rec_Tree_String
+

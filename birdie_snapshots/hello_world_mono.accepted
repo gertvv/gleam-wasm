@@ -1,0 +1,109 @@
+---
+version: 1.5.5
+title: hello_world mono
+file: ./test/gl_to_wasm/codegen_test.gleam
+test_name: type_graph_hello_world_test
+---
+---
+main: hello_main
+types:
+- name: Nil
+  untyped_name: Nil
+  display_name: Nil
+  variants:
+  - name: Nil
+    untyped_name: Nil
+    display_name: Nil
+    fields:
+functions:
+- name: hello_main
+  environment:
+  parameters:
+  return:
+    kind: NamedType
+    id: String
+    parameters:
+  body:
+    kind: CallGlobal
+    type:
+      kind: NamedType
+      id: String
+      parameters:
+    id: echo__String
+    args:
+    - kind: Literal
+      type:
+        kind: NamedType
+        id: String
+        parameters:
+      value: "String(Hello, World!)"
+- name: echo__String
+  environment:
+  parameters:
+  - name: value
+    type:
+      kind: NamedType
+      id: String
+      parameters:
+  return:
+    kind: NamedType
+    id: String
+    parameters:
+  body:
+    kind: Let
+    type:
+      kind: NamedType
+      id: String
+      parameters:
+    var: _
+    val:
+      kind: CallGlobal
+      type:
+        kind: NamedType
+        id: Nil
+        parameters:
+      id: print_string
+      args:
+      - kind: CallGlobal
+        type:
+          kind: NamedType
+          id: String
+          parameters:
+        id: inspect_String
+        args:
+        - kind: Local
+          type:
+            kind: NamedType
+            id: String
+            parameters:
+          var: value
+    exp:
+      kind: Let
+      type:
+        kind: NamedType
+        id: String
+        parameters:
+      var: _V1
+      val:
+        kind: CallGlobal
+        type:
+          kind: NamedType
+          id: Nil
+          parameters:
+        id: print_string
+        args:
+        - kind: Literal
+          type:
+            kind: NamedType
+            id: String
+            parameters:
+          value: "String(\\n)"
+      exp:
+        kind: Local
+        type:
+          kind: NamedType
+          id: String
+          parameters:
+        var: value
+externals:
+

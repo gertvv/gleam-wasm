@@ -1,0 +1,124 @@
+---
+version: 1.5.5
+title: rectype mono
+file: ./test/gl_to_wasm/codegen_test.gleam
+test_name: type_graph_type_recursion_test
+---
+---
+main: rec_main
+types:
+- name: rec_Tree_String
+  untyped_name: rec_Tree
+  display_name: Tree
+  variants:
+  - name: rec_Branch_String
+    untyped_name: rec_Branch
+    display_name: Branch
+    fields:
+    - name: field0
+      type:
+        kind: NamedType
+        id: rec_Tree
+        parameters:
+        - kind: NamedType
+          id: String
+          parameters:
+    - name: field1
+      type:
+        kind: NamedType
+        id: rec_Tree
+        parameters:
+        - kind: NamedType
+          id: String
+          parameters:
+  - name: rec_Leaf_String
+    untyped_name: rec_Leaf
+    display_name: Leaf
+    fields:
+    - name: field0
+      type:
+        kind: NamedType
+        id: String
+        parameters:
+functions:
+- name: rec_main
+  environment:
+  parameters:
+  return:
+    kind: NamedType
+    id: rec_Tree
+    parameters:
+    - kind: NamedType
+      id: String
+      parameters:
+  body:
+    kind: CallGlobal
+    type:
+      kind: NamedType
+      id: rec_Tree
+      parameters:
+      - kind: NamedType
+        id: String
+        parameters:
+    id: new_rec_Branch_String
+    args:
+    - kind: CallGlobal
+      type:
+        kind: NamedType
+        id: rec_Tree
+        parameters:
+        - kind: NamedType
+          id: String
+          parameters:
+      id: new_rec_Branch_String
+      args:
+      - kind: CallGlobal
+        type:
+          kind: NamedType
+          id: rec_Tree
+          parameters:
+          - kind: NamedType
+            id: String
+            parameters:
+        id: new_rec_Leaf_String
+        args:
+        - kind: Literal
+          type:
+            kind: NamedType
+            id: String
+            parameters:
+          value: "String(a)"
+      - kind: CallGlobal
+        type:
+          kind: NamedType
+          id: rec_Tree
+          parameters:
+          - kind: NamedType
+            id: String
+            parameters:
+        id: new_rec_Leaf_String
+        args:
+        - kind: Literal
+          type:
+            kind: NamedType
+            id: String
+            parameters:
+          value: "String(b)"
+    - kind: CallGlobal
+      type:
+        kind: NamedType
+        id: rec_Tree
+        parameters:
+        - kind: NamedType
+          id: String
+          parameters:
+      id: new_rec_Leaf_String
+      args:
+      - kind: Literal
+        type:
+          kind: NamedType
+          id: String
+          parameters:
+        value: "String(c)"
+externals:
+
