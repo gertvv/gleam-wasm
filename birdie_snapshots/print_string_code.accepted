@@ -4,15 +4,15 @@ title: print_string code
 file: ./test/gl_to_wasm/codegen_test.gleam
 test_name: codegen_hello_world_test
 ---
-(func (type 5)
+(func (type 6)
   (local (ref 0))
   (local i32)
   (local i32)
   local.get 0
-  struct.get 3 0
+  struct.get 4 0
   local.set 2
   local.get 0
-  struct.get 3 1
+  struct.get 4 1
   local.set 1
   block
   loop
@@ -35,4 +35,4 @@ test_name: codegen_hello_world_test
   i32.const 0
   local.get 2
   call 0
-  struct.new 2)
+  struct.new 3)

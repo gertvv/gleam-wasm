@@ -4,7 +4,7 @@ title: hello_world main code
 file: ./test/gl_to_wasm/codegen_test.gleam
 test_name: codegen_hello_world_test
 ---
-(func (type 7)
+(func (type 8)
   (local (ref 0))
   i32.const 0
   i32.const 13
@@ -17,5 +17,5 @@ test_name: codegen_hello_world_test
   array.init_data 0 0
   i32.const 13
   local.get 0
-  struct.new 3
+  struct.new 4
   call 4)

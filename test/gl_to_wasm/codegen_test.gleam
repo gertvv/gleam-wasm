@@ -92,9 +92,7 @@ pub fn codegen_hello_world_test() {
   let assert Ok(main) = dict.get(funcs, "hello_main")
   wasm.function_to_string(main)
   |> birdie.snap("hello_world main code")
-  // |> pprint.format
-  // |> birdie.snap("hello_world types")
-  // 
+
   wasm.emit_module(wasm, file_output_stream("hello.wasm"))
 }
 
@@ -155,8 +153,8 @@ pub fn type_graph_closure_test() {
   |> graph_to_yaml(type_to_string)
   |> cymbal.encode
   |> birdie.snap("closure type graph")
-  // let assert Ok(wasm) = codegen.codegen(module, "hello", "hello_main")
-  // wasm.emit_module(wasm, file_output_stream("sayer.wasm"))
+  let assert Ok(wasm) = codegen.codegen(module, "hello", "hello_main")
+  wasm.emit_module(wasm, file_output_stream("sayer.wasm"))
 }
 
 fn graph_to_yaml(

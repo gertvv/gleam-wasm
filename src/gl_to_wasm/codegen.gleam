@@ -6,6 +6,7 @@ import gleam/bit_array
 import gleam/bool
 import gleam/bytes_tree
 import gleam/dict.{type Dict}
+import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/pair
@@ -18,6 +19,8 @@ import snag.{type Snag}
 //  - it would be nice to extract the types that aren't constructed within Gleam's type system
 //    (String, BitArray, Int, Float, UtfCodePoint, perhaps Bool & Nil)
 //  - the fact that builtin functions are omitted is awkward
+
+// !!! TODO: functions (and expressions?) that return a FunctionType should now actually return Closure
 
 pub type Type {
   // True closures take an environment struct as their first argument, which
@@ -75,7 +78,40 @@ pub fn codegen(
   use ctx <- result.try(
     build_functions(ctx, module) |> snag.context("build_functions"),
   )
+  use ctx <- result.try(register_elements(ctx))
   register_exports(ctx, module, main_name) |> snag.context("register_exports")
+}
+
+fn add_code(
+  fb: wasm.CodeBuilder,
+  code: List(wasm.Instruction),
+) -> Result(wasm.CodeBuilder, Snag) {
+  list.try_fold(code, fb, fn(fb, instr) {
+    wasm.add_instruction(fb, instr)
+    |> snag.map_error(fn(x) { x })
+    |> snag.context(
+      "wasm.add_instruction(" <> wasm.instruction_to_string(instr) <> ")",
+    )
+  })
+}
+
+fn register_elements(ctx: Context) -> Result(Context, Snag) {
+  // Closures will be called by reference. For that, they will need to be declared outside the code
+  // section first. We use an `(elem declare func $f)` but for that. 
+  // Currently all functions are added, whether they are called by reference or not.
+  use mb <- result.map(
+    wasm.add_declarative_element(
+      ctx.mb,
+      int.range(
+        from: 0,
+        to: dict.size(ctx.functions),
+        with: [],
+        run: list.prepend,
+      ),
+    )
+    |> to_snag("wasm.add_declarative_element"),
+  )
+  Context(..ctx, mb:)
 }
 
 fn register_data(ctx: Context) -> Result(Context, Snag) {
@@ -152,7 +188,7 @@ fn register_types(ctx: Context) -> Result(Context, Snag) {
       && group != [NamedType("UtfCodepoint")]
     })
 
-  // TODO: perhaps we can make this immutable again when we initialize strings properly?
+  // byte array is an implementation detail
   let byte_array =
     wasm.Array(None, wasm.PackedType(None, wasm.Mutable, wasm.I8))
   use #(mb, id) <- result.try(
@@ -160,6 +196,27 @@ fn register_types(ctx: Context) -> Result(Context, Snag) {
     |> to_snag("wasm.add_type(byte_array)"),
   )
   assert byte_array_index == id
+
+  // closure object (encapsulating an environment and a function)
+  let closure =
+    wasm.Struct(Some("Closure"), [
+      wasm.ValueType(
+        Some("env"),
+        wasm.Immutable,
+        wasm.Ref(wasm.Nullable(wasm.AbstractStruct)),
+      ),
+      wasm.ValueType(
+        Some("func"),
+        wasm.Immutable,
+        wasm.Ref(wasm.NonNull(wasm.AbstractFunc)),
+      ),
+    ])
+  use #(mb, id) <- result.try(
+    wasm.add_type(mb, closure)
+    |> to_snag("wasm.add_type(Closure)"),
+  )
+  assert closure_type_index == id
+
   let ctx = Context(..ctx, mb:, next_type_index: id + 1)
   use ctx <- result.try(list.try_fold(groups, ctx, register_type_group))
   Ok(ctx)
@@ -204,6 +261,8 @@ fn register_type_group(ctx: Context, ts: List(Type)) -> Result(Context, Snag) {
 }
 
 const byte_array_index = 0
+
+const closure_type_index = 1
 
 fn generate_string_type() -> Result(wasm.SubType, Snag) {
   // TODO: do we really still need this to be a struct?
@@ -484,27 +543,6 @@ fn register_functions(ctx: Context) -> Result(Context, Snag) {
     |> dict.merge(ctx.functions, _)
   let ctx = Context(..ctx, mb:, fbs:, functions:)
   Ok(ctx)
-  // TODO: closures!
-  // Closures will be called by reference. For that, they will need to be declared outside the code
-  // section first. Ideally use an `(elem declare func $f)` but for now set a global. 
-  // let floor = floor + list.length(module.functions)
-  // use mb <- result.map(
-  //   list.index_map(closures, fn(closure, index) { #(index + floor, closure) })
-  //   |> list.try_fold(ctx.mb, fn(mb, closure) {
-  //     let #(f_idx, #(id, wasm.FunctionSignature(type_idx, ..))) = closure
-  //     use #(mb, gb) <- result.try(wasm.create_global_builder(
-  //       mb,
-  //       Some(id),
-  //       wasm.Immutable,
-  //       wasm.Ref(wasm.NonNull(wasm.ConcreteType(type_idx))),
-  //     ))
-  //     use gb <- result.try(wasm.add_instruction(gb, wasm.RefFunc(f_idx)))
-  //     use gb <- result.try(wasm.add_instruction(gb, wasm.End))
-  //     wasm.finalize_global(mb, gb)
-  //   })
-  //   |> result.map_error(WasmError),
-  // )
-  // Context(..ctx, mb:)
 }
 
 // === Build functions ===
@@ -535,10 +573,7 @@ fn build_functions(ctx: Context, module: mono.Context) -> Result(Context, Snag) 
       // Generate the body of the function.
       use fb <- result.try(codegen_expr(fb, func.body, local_env, ctx))
       // Close and finalize the function.
-      use fb <- result.try(
-        wasm.add_instruction(fb, wasm.End)
-        |> to_snag("wasm.add_instruction(End)"),
-      )
+      use fb <- result.try(add_code(fb, [wasm.End]))
       use mb <- result.map(
         wasm.finalize_function(ctx.mb, fb) |> to_snag("wasm.finalize_function"),
       )
@@ -582,54 +617,22 @@ fn codegen_expr(
               |> to_snag("wasm.add_local"),
             )
             let assert Ok(zero) = wasm.int32_unsigned(0)
-            use fb <- result.try(
-              wasm.add_instruction(fb, wasm.I32Const(zero))
-              |> to_snag("wasm.add_instruction(I32Const)"),
-            )
-            use fb <- result.try(
-              wasm.add_instruction(fb, wasm.I32Const(size))
-              |> to_snag("wasm.add_instruction(I32Const)"),
-            )
-            // second field of the struct
-            use fb <- result.try(
-              wasm.add_instruction(fb, wasm.ArrayNew(byte_array_index))
-              |> to_snag("wasm.add_instruction(ArrayNew)"),
-            )
-            use fb <- result.try(
-              wasm.add_instruction(fb, wasm.LocalSet(bytes_idx))
-              |> to_snag("wasm.add_instruction(LocalSet)"),
-            )
-            use fb <- result.try(
-              wasm.add_instruction(fb, wasm.LocalGet(bytes_idx))
-              |> to_snag("wasm.add_instruction(LocalGet)"),
-            )
-            use fb <- result.try(
-              wasm.add_instruction(fb, wasm.I32Const(zero))
-              |> to_snag("wasm.add_instruction(I32Const)"),
-            )
-            use fb <- result.try(
-              wasm.add_instruction(fb, wasm.I32Const(offset))
-              |> to_snag("wasm.add_instruction(I32Const)"),
-            )
-            use fb <- result.try(
-              wasm.add_instruction(fb, wasm.I32Const(size))
-              |> to_snag("wasm.add_instruction(I32Const)"),
-            )
-            use fb <- result.try(
-              wasm.add_instruction(fb, wasm.ArrayInitData(byte_array_index, 0))
-              |> to_snag("wasm.add_instruction(ArrayInitData)"),
-            )
-            // create the String struct
-            use fb <- result.try(
-              wasm.add_instruction(fb, wasm.I32Const(size))
-              |> to_snag("wasm.add_instruction(I32Const)"),
-            )
-            use fb <- result.try(
-              wasm.add_instruction(fb, wasm.LocalGet(bytes_idx))
-              |> to_snag("wasm.add_instruction(LocalGet)"),
-            )
-            wasm.add_instruction(fb, wasm.StructNew(type_index))
-            |> to_snag("wasm.add_instruction(StructNew)")
+            add_code(fb, [
+              wasm.I32Const(zero),
+              // initialize the bytes
+              wasm.I32Const(size),
+              wasm.ArrayNew(byte_array_index),
+              wasm.LocalSet(bytes_idx),
+              wasm.LocalGet(bytes_idx),
+              wasm.I32Const(zero),
+              wasm.I32Const(offset),
+              wasm.I32Const(size),
+              wasm.ArrayInitData(byte_array_index, 0),
+              // create the String struct
+              wasm.I32Const(size),
+              wasm.LocalGet(bytes_idx),
+              wasm.StructNew(type_index),
+            ])
           }
           core.BitArray(size: _) -> todo
         }
@@ -638,8 +641,7 @@ fn codegen_expr(
     mono.Local(typ: _, var:) ->
       {
         let assert Ok(idx) = dict.get(local_env, var)
-        wasm.add_instruction(fb, wasm.LocalGet(idx))
-        |> to_snag("wasm.add_instruction(LocalGet)")
+        add_code(fb, [wasm.LocalGet(idx)])
       }
       |> snag.context("Local " <> var)
     mono.ConstantGlobal(typ: _, id: _) -> todo
@@ -652,30 +654,64 @@ fn codegen_expr(
         )
         let assert Ok(f_idx) = dict.get(ctx.functions, id)
           as { "Missing global function " <> id }
-        wasm.add_instruction(fb, wasm.Call(f_idx))
-        |> to_snag("wasm.add_instruction(Call)")
+        add_code(fb, [wasm.Call(f_idx)])
       }
       |> snag.context("CallGlobal " <> id)
     mono.BindClosure(typ: _, id: _, environment: _) -> todo
-    mono.CallClosure(typ: _, fun:, args:) ->
+    mono.CallClosure(typ:, fun:, args:) ->
       {
+        let ret_type = wasm_value_type(ctx, map_type(typ))
+        let fun_type = map_type(fun.typ)
+        let assert Ok(fun_global_type_idx) = dict.get(ctx.types, fun_type)
+        let assert FunctionType(parameters:, return:) = fun_type
+        let fun_type = FunctionType([AbstractEnv, ..parameters], return)
+        let assert Ok(fun_closure_type_idx) = dict.get(ctx.types, fun_type)
+        use #(fb, closure_idx) <- result.try(
+          wasm.add_local(
+            fb,
+            wasm.Ref(wasm.NonNull(wasm.ConcreteType(closure_type_index))),
+            None,
+          )
+          |> to_snag("wasm.add_local"),
+        )
+        use fb <- result.try(codegen_expr(fb, fun, local_env, ctx))
+        use fb <- result.try(
+          add_code(fb, [
+            wasm.LocalSet(closure_idx),
+            wasm.LocalGet(closure_idx),
+            wasm.StructGet(closure_type_index, 0),
+          ]),
+        )
+        // now the closure struct is a local, and the environment is on the stack
+        // now put each argument on the stack
         use fb <- result.try(
           list.try_fold(args, fb, fn(fb, arg) {
             codegen_expr(fb, arg, local_env, ctx)
           }),
         )
-        use fb <- result.try(codegen_expr(fb, fun, local_env, ctx))
-        todo
+        // finally, put the function on the stack and call it
+        add_code(fb, [
+          wasm.LocalGet(closure_idx),
+          wasm.StructGet(closure_type_index, 1),
+          wasm.LocalGet(closure_idx),
+          wasm.StructGet(closure_type_index, 0),
+          wasm.RefIsNull,
+          // first branch: if the env is null, call global
+          wasm.If(wasm.BlockValue(ret_type)),
+          wasm.RefCast(wasm.NonNull(wasm.ConcreteType(fun_global_type_idx))),
+          wasm.CallRef(fun_global_type_idx),
+          wasm.Else,
+          wasm.RefCast(wasm.NonNull(wasm.ConcreteType(fun_closure_type_idx))),
+          wasm.CallRef(fun_closure_type_idx),
+          wasm.End,
+        ])
       }
       |> snag.context("CallClosure")
     mono.Op(typ: _, op: _, args: _) -> todo
     mono.Let(typ: _, var: "_" <> _, val:, exp:) -> {
       // we don't create and set locals for anonymous variables
       use fb <- result.try(codegen_expr(fb, val, local_env, ctx))
-      use fb <- result.try(
-        wasm.add_instruction(fb, wasm.Drop)
-        |> to_snag("wasm.add_instruction(Drop)"),
-      )
+      use fb <- result.try(add_code(fb, [wasm.Drop]))
       // generate the body
       codegen_expr(fb, exp, local_env, ctx)
     }
@@ -690,10 +726,7 @@ fn codegen_expr(
         // generate the assigned value
         use fb <- result.try(codegen_expr(fb, val, local_env, ctx))
         // set the local
-        use fb <- result.try(
-          wasm.add_instruction(fb, wasm.LocalSet(local_idx))
-          |> to_snag("wasm.add_instruction(LocalSet)"),
-        )
+        use fb <- result.try(add_code(fb, [wasm.LocalSet(local_idx)]))
         let local_env = dict.insert(local_env, var, local_idx)
         // generate the body
         codegen_expr(fb, exp, local_env, ctx)
@@ -802,7 +835,7 @@ fn build_print_string(
     wasm.add_local(fb, wasm.I32, Some("idx"))
     |> to_snag("wasm.add_local(idx)"),
   )
-  [
+  add_code(fb, [
     // initialize locals
     wasm.LocalGet(0),
     wasm.StructGet(string_type_idx, 0),
@@ -844,19 +877,15 @@ fn build_print_string(
     wasm.Call(print_idx),
     wasm.StructNew(nil_type_idx),
     wasm.End,
-  ]
-  |> list.try_fold(fb, wasm.add_instruction)
-  |> to_snag("wasm.add_instruction")
+  ])
 }
 
 fn build_inspect_string(
   fb: wasm.CodeBuilder,
   _ctx: Context,
 ) -> Result(wasm.CodeBuilder, Snag) {
-  [
+  add_code(fb, [
     wasm.LocalGet(0),
     wasm.End,
-  ]
-  |> list.try_fold(fb, wasm.add_instruction)
-  |> to_snag("wasm.add_instruction(LocalGet)")
+  ])
 }
