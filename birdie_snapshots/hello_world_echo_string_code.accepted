@@ -4,7 +4,7 @@ title: hello_world echo__String code
 file: ./test/gl_to_wasm/codegen_test.gleam
 test_name: codegen_hello_world_test
 ---
-(func (type 5)
+(func (type 8)
   (local (ref 0))
   local.get 0
   call 1

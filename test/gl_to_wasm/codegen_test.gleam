@@ -74,7 +74,7 @@ pub fn codegen_hello_world_test() {
   |> birdie.snap("hello_world mono")
 
   codegen.construct_type_graph(module)
-  |> graph_to_yaml(type_to_string)
+  |> graph_to_yaml(codegen.val_type_to_string)
   |> cymbal.encode
   |> birdie.snap("hello_world type graph")
 
@@ -132,7 +132,7 @@ pub fn type_graph_type_recursion_test() {
   |> birdie.snap("rectype mono")
 
   codegen.construct_type_graph(module)
-  |> graph_to_yaml(type_to_string)
+  |> graph_to_yaml(codegen.val_type_to_string)
   |> cymbal.encode
   |> birdie.snap("rectype type graph")
 }
@@ -150,10 +150,10 @@ pub fn type_graph_closure_test() {
   |> birdie.snap("closure mono")
 
   codegen.construct_type_graph(module)
-  |> graph_to_yaml(type_to_string)
+  |> graph_to_yaml(codegen.val_type_to_string)
   |> cymbal.encode
   |> birdie.snap("closure type graph")
-  let assert Ok(wasm) = codegen.codegen(module, "hello", "hello_main")
+  let assert Ok(wasm) = codegen.codegen(module, "rec", "rec_main")
   wasm.emit_module(wasm, file_output_stream("sayer.wasm"))
 }
 
@@ -188,21 +188,6 @@ fn graph_to_yaml(
       ),
     ),
   ])
-}
-
-fn type_to_string(t: codegen.Type) {
-  case t {
-    codegen.AbstractEnv -> "AbstractEnv"
-    codegen.Env(closure_name:) -> "Env(" <> closure_name <> ")"
-    codegen.NamedType(name:) -> name
-    codegen.NamedTypeVariant(type_name:, variant_name:) ->
-      type_name <> "/" <> variant_name
-    codegen.FunctionType(parameters:, return:) ->
-      "fn("
-      <> list.map(parameters, type_to_string) |> string.join(", ")
-      <> ") -> "
-      <> type_to_string(return)
-  }
 }
 
 fn mono_to_yaml(mono: #(mono.Context, String)) -> cymbal.Yaml {

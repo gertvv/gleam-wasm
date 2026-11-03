@@ -7,40 +7,13 @@ test_name: type_graph_closure_test
 ---
 nodes:
 - BitArray
-- "Env(Closure_rec_0_String)"
 - Float
 - Int
 - Nil
 - "Nil/Nil"
 - String
 - UtfCodepoint
-- "fn() -> Nil/Nil"
-- "fn() -> String"
-- "fn(AbstractEnv) -> String"
-- "fn(String) -> Nil"
-- "fn(String) -> String"
-- "fn(String) -> fn() -> String"
 edges:
-- a: "Env(Closure_rec_0_String)"
-  b: String
 - a: "Nil/Nil"
   b: Nil
-- a: "fn() -> Nil/Nil"
-  b: "Nil/Nil"
-- a: "fn() -> String"
-  b: String
-- a: "fn(AbstractEnv) -> String"
-  b: AbstractEnv
-- a: "fn(AbstractEnv) -> String"
-  b: String
-- a: "fn(String) -> Nil"
-  b: Nil
-- a: "fn(String) -> Nil"
-  b: String
-- a: "fn(String) -> String"
-  b: String
-- a: "fn(String) -> fn() -> String"
-  b: String
-- a: "fn(String) -> fn() -> String"
-  b: "fn() -> String"
 

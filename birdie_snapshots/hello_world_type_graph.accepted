@@ -13,21 +13,7 @@ nodes:
 - "Nil/Nil"
 - String
 - UtfCodepoint
-- "fn() -> Nil/Nil"
-- "fn() -> String"
-- "fn(String) -> Nil"
-- "fn(String) -> String"
 edges:
 - a: "Nil/Nil"
   b: Nil
-- a: "fn() -> Nil/Nil"
-  b: "Nil/Nil"
-- a: "fn() -> String"
-  b: String
-- a: "fn(String) -> Nil"
-  b: Nil
-- a: "fn(String) -> Nil"
-  b: String
-- a: "fn(String) -> String"
-  b: String
 

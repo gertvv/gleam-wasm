@@ -4,7 +4,7 @@ title: print_string code
 file: ./test/gl_to_wasm/codegen_test.gleam
 test_name: codegen_hello_world_test
 ---
-(func (type 6)
+(func (type 9)
   (local (ref 0))
   (local i32)
   (local i32)
