@@ -1,0 +1,16 @@
+---
+version: 1.5.5
+title: global_as_closure run code
+file: ./test/gl_to_wasm/codegen_test.gleam
+test_name: codegen_global_as_closure_test
+---
+(func (type 9)
+  (local (ref 1))
+  local.get 0
+  local.set 1
+  local.get 1
+  struct.get 1 0
+  local.get 1
+  struct.get 1 1
+  ref.cast (ref 10)
+  call_ref 10)

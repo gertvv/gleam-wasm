@@ -49,6 +49,7 @@ type Context {
     fun_types: Dict(FunType, Int),
     next_type_index: Int,
     functions: Dict(String, Int),
+    need_wrapping: List(String),
     module: mono.Context,
     strings: Dict(String, #(Int, Int)),
   )
@@ -70,6 +71,7 @@ pub fn codegen(
       fun_types: dict.new(),
       next_type_index: 0,
       functions: dict.new(),
+      need_wrapping: [],
       module:,
       strings: dict.new(),
     )
@@ -83,11 +85,10 @@ pub fn codegen(
   use ctx <- result.try(
     register_functions(ctx) |> snag.context("register_functions"),
   )
-  use ctx <- result.try(
-    build_functions(ctx, module) |> snag.context("build_functions"),
-  )
+  use ctx <- result.try(build_functions(ctx) |> snag.context("build_functions"))
+  use ctx <- result.try(build_wrappers(ctx) |> snag.context("build_wrappers"))
   use ctx <- result.try(register_elements(ctx))
-  register_exports(ctx, module, main_name) |> snag.context("register_exports")
+  register_exports(ctx, main_name) |> snag.context("register_exports")
 }
 
 fn add_code(
@@ -169,7 +170,6 @@ fn find_string_literals_exp(exp: mono.Exp) -> List(String) {
 
 fn register_exports(
   ctx: Context,
-  _module: mono.Context,
   main_name: String,
 ) -> Result(wasm.ModuleBuilder, Snag) {
   let assert Ok(idx) = dict.get(ctx.functions, main_name)
@@ -211,7 +211,7 @@ fn register_types(ctx: Context) -> Result(Context, Snag) {
       wasm.ValueType(
         Some("env"),
         wasm.Immutable,
-        wasm.Ref(wasm.Nullable(wasm.AbstractStruct)),
+        wasm.Ref(wasm.NonNull(wasm.AbstractStruct)),
       ),
       wasm.ValueType(
         Some("func"),
@@ -240,6 +240,9 @@ fn register_types(ctx: Context) -> Result(Context, Snag) {
 
 fn register_function_types(ctx: Context) -> Result(Context, Snag) {
   let module = ctx.module
+
+  let need_wrapping = find_need_wrapping(module)
+
   // TODO: should get builtins from mono!
   let builtin_types = [
     FunType([NamedType("String")], NamedType("String")),
@@ -253,6 +256,7 @@ fn register_function_types(ctx: Context) -> Result(Context, Snag) {
       list.map(module.externals, fn(ext) { map_external_type(ext.typ) }),
     )
     |> list.append(list.map(module.functions, map_func_type))
+    |> list.append(list.map(need_wrapping, map_wrap_type(module, _)))
     |> list.append(builtin_types)
     |> list.unique
 
@@ -268,10 +272,20 @@ fn register_function_types(ctx: Context) -> Result(Context, Snag) {
   )
 
   // register closure environment types
+  let assert Ok(nil_type_idx) = dict.get(ctx.val_types, NamedType("Nil"))
   use #(ctx, _) <- result.map(
     list.try_fold(module.functions, #(ctx, dict.new()), fn(ctx, fun) {
-      use <- bool.guard(fun.environment == [], Ok(ctx))
       let #(ctx, envs) = ctx
+      use <- bool.guard(
+        fun.environment == [],
+        Ok(#(
+          Context(
+            ..ctx,
+            val_types: dict.insert(ctx.val_types, Env(fun.name), nil_type_idx),
+          ),
+          envs,
+        )),
+      )
       let fields = list.map(fun.environment, fn(field) { map_type(field.typ) })
       case dict.get(envs, fields) {
         Ok(type_idx) ->
@@ -304,7 +318,51 @@ fn register_function_types(ctx: Context) -> Result(Context, Snag) {
     }),
   )
 
-  ctx
+  Context(..ctx, need_wrapping:)
+}
+
+fn map_wrap_type(module: mono.Context, fun_name: String) -> FunType {
+  // TODO: I guess also constructors!
+  let fun_type = case
+    list.find(module.functions, fn(f) { f.name == fun_name }),
+    list.find(module.externals, fn(f) { f.internal_name == fun_name })
+  {
+    Ok(func), _ -> map_func_type(func)
+    _, Ok(ext) -> map_external_type(ext.typ)
+    _, _ -> panic
+  }
+  FunType([AbstractEnv, ..fun_type.parameters], fun_type.return)
+}
+
+/// Find functions in need of wrapping as Closures
+/// TODO: ideally previous steps do this, and we wouldn't need to
+/// generate the non-wrapped version for anonymous functions
+fn find_need_wrapping(module: mono.Context) -> List(String) {
+  list.flat_map(module.functions, fn(func) {
+    find_need_wrapping_expr(func.body)
+  })
+  |> list.unique
+}
+
+fn find_need_wrapping_expr(expr: mono.Exp) -> List(String) {
+  let recur = fn(lst) { list.flat_map(lst, find_need_wrapping_expr) }
+  case expr {
+    mono.Literal(..) -> []
+    mono.Local(..) -> []
+    mono.ConstantGlobal(..) -> []
+    mono.CallGlobal(args:, ..) -> recur(args)
+    mono.BindClosure(id:, environment:, ..) ->
+      case environment {
+        [] -> [id, ..recur(environment)]
+        [_, ..] -> recur(environment)
+      }
+    mono.CallClosure(fun:, args:, ..) -> recur([fun, ..args])
+    mono.Op(args:, ..) -> recur(args)
+    mono.Let(val:, exp:, ..) -> recur([val, exp])
+    mono.If(cond:, then_exp:, else_exp:, ..) ->
+      recur([cond, then_exp, else_exp])
+    mono.Panic(value:, ..) -> find_need_wrapping_expr(value)
+  }
 }
 
 fn register_type_group(ctx: Context, ts: List(ValType)) -> Result(Context, Snag) {
@@ -586,30 +644,40 @@ fn register_functions(ctx: Context) -> Result(Context, Snag) {
   let functions =
     list.map(ctx.module.functions, fn(func) {
       let assert Ok(type_idx) = dict.get(ctx.fun_types, map_func_type(func))
+      let param_names =
+        list.map(func.parameters, fn(param) { param.name })
+        |> fn(params) {
+          case func.environment {
+            [] -> params
+            _ -> ["ENV", ..params]
+          }
+        }
       #(
         func.name,
-        wasm.FunctionSignature(
-          type_idx,
-          Some(func.name),
-          Some(
-            list.map(func.parameters, fn(param) { param.name })
-            |> fn(params) {
-              case func.environment {
-                [] -> params
-                _ -> ["ENV", ..params]
-              }
-            },
-          ),
-        ),
+        wasm.FunctionSignature(type_idx, Some(func.name), Some(param_names)),
+      )
+    })
+  let wrappers =
+    list.map(ctx.need_wrapping, fn(func_name) {
+      let fun_type = map_wrap_type(ctx.module, func_name)
+      let assert Ok(type_idx) = dict.get(ctx.fun_types, fun_type)
+      #(
+        "Wrap$" <> func_name,
+        wasm.FunctionSignature(type_idx, Some("Wrap$" <> func_name), None),
       )
     })
   use #(mb, fbs) <- result.try(
-    wasm.create_function_builders(ctx.mb, list.map(functions, pair.second))
+    wasm.create_function_builders(
+      ctx.mb,
+      list.map(list.append(functions, wrappers), pair.second),
+    )
     |> to_snag("wasm.create_function_builders"),
   )
   let floor = dict.size(ctx.functions)
   let functions =
-    list.index_map(functions, fn(func, idx) { #(func.0, floor + idx) })
+    list.index_map(list.append(functions, wrappers), fn(func, idx) {
+      #(func.0, floor + idx)
+    })
     |> dict.from_list
     |> dict.merge(ctx.functions, _)
   let ctx = Context(..ctx, mb:, fbs:, functions:)
@@ -618,7 +686,36 @@ fn register_functions(ctx: Context) -> Result(Context, Snag) {
 
 // === Build functions ===
 
-fn build_functions(ctx: Context, module: mono.Context) -> Result(Context, Snag) {
+fn build_wrappers(ctx: Context) -> Result(Context, Snag) {
+  // A wasm.CodeBuilder has been pre-registered for each function
+  list.zip(
+    ctx.need_wrapping,
+    list.drop(ctx.fbs, list.length(ctx.module.functions)),
+  )
+  |> list.try_fold(ctx, fn(ctx, build) {
+    let #(func_name, fb) = build
+    let assert Ok(func_idx) = dict.get(ctx.functions, func_name)
+    let func_type = map_wrap_type(ctx.module, func_name)
+    {
+      let code =
+        list.flatten([
+          list.index_map(list.drop(func_type.parameters, 1), fn(_p, idx) {
+            wasm.LocalGet(idx + 1)
+          }),
+          [wasm.Call(func_idx), wasm.End],
+        ])
+      use fb <- result.try(add_code(fb, code))
+      use mb <- result.map(
+        wasm.finalize_function(ctx.mb, fb) |> to_snag("wasm.finalize_function"),
+      )
+      Context(..ctx, mb:)
+    }
+    |> snag.context("building " <> func_name)
+  })
+}
+
+fn build_functions(ctx: Context) -> Result(Context, Snag) {
+  let module = ctx.module
   // A wasm.CodeBuilder has been pre-registered for each function
   list.zip(module.functions, ctx.fbs)
   |> list.try_fold(ctx, fn(ctx, build) {
@@ -720,7 +817,7 @@ fn codegen_expr(
           core.Int(value: _) -> todo
           core.Float(value: _) -> todo
           core.String(value:) -> {
-            // TODO: String literals should be initialized form the data or element section
+            // TODO: Ideally store string literals in a table
             let assert Ok(type_index) =
               dict.get(ctx.val_types, NamedType("String"))
             let assert Ok(value) = glexer.unescape_string(value)
@@ -778,7 +875,15 @@ fn codegen_expr(
       |> snag.context("CallGlobal " <> id)
     mono.BindClosure(typ: _, id:, environment:) ->
       {
-        let assert Ok(fun_idx) = dict.get(ctx.functions, id)
+        let assert Ok(fun_idx) =
+          dict.get(
+            ctx.functions,
+            case environment {
+              [] -> "Wrap$"
+              [_, ..] -> ""
+            }
+              <> id,
+          )
         let assert Ok(env_type_idx) = dict.get(ctx.val_types, Env(id))
         use fb <- result.try(
           list.try_fold(environment, fb, fn(fb, arg) {
@@ -795,7 +900,6 @@ fn codegen_expr(
     mono.CallClosure(typ: _, fun:, args:) ->
       {
         let fun_type = map_external_type(fun.typ)
-        let assert Ok(fun_global_type_idx) = dict.get(ctx.fun_types, fun_type)
         let fun_type =
           FunType([AbstractEnv, ..fun_type.parameters], fun_type.return)
         let assert Ok(fun_closure_type_idx) = dict.get(ctx.fun_types, fun_type)
@@ -813,7 +917,6 @@ fn codegen_expr(
             wasm.LocalSet(closure_idx),
             wasm.LocalGet(closure_idx),
             wasm.StructGet(closure_type_index, closure_env_index),
-            wasm.RefAsNonNull,
           ]),
         )
         // now the closure struct is a local, and the environment is on the stack
@@ -871,13 +974,6 @@ fn codegen_expr(
   }
 }
 
-fn bit_array_to_bytes(bit_array: BitArray) -> List(Int) {
-  case bit_array {
-    <<byte:size(8), rest:bits>> -> [byte, ..bit_array_to_bytes(rest)]
-    _ -> []
-  }
-}
-
 // === built-in functions ===
 
 fn build_builtins(ctx: Context) -> Result(Context, Snag) {
@@ -917,7 +1013,7 @@ fn build_builtins(ctx: Context) -> Result(Context, Snag) {
       build_print_string,
     ),
   ]
-  use ctx <- result.map(
+  use ctx <- result.try(
     list.try_fold(builtins, ctx, fn(ctx, builtin) {
       let #(name, func_type, build) = builtin
       {
@@ -939,8 +1035,26 @@ fn build_builtins(ctx: Context) -> Result(Context, Snag) {
       |> snag.context("build " <> name)
     }),
   )
-  ctx
+
+  let assert Ok(nil_type_idx) = dict.get(ctx.val_types, NamedType("Nil"))
+  use #(mb, cb) <- result.try(
+    wasm.create_global_builder(
+      ctx.mb,
+      Some("Nil"),
+      wasm.Immutable,
+      wasm.Ref(wasm.NonNull(wasm.ConcreteType(nil_type_idx))),
+    )
+    |> to_snag("wasm.create_global_builder"),
+  )
+  use cb <- result.try(add_code(cb, [wasm.StructNew(nil_type_idx), wasm.End]))
+  use mb <- result.map(
+    wasm.finalize_global(mb, cb) |> to_snag("wasm.finalize_global"),
+  )
+
+  Context(..ctx, mb:)
 }
+
+const nil_global_idx = 0
 
 fn build_print_string(
   fb: wasm.CodeBuilder,

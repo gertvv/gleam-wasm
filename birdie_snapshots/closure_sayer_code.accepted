@@ -1,0 +1,11 @@
+---
+version: 1.5.5
+title: closure sayer code
+file: ./test/gl_to_wasm/codegen_test.gleam
+test_name: codegen_closure_test
+---
+(func (type 9)
+  local.get 0
+  struct.new 12
+  ref.func 6
+  struct.new 1)

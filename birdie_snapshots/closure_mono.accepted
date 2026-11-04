@@ -2,7 +2,7 @@
 version: 1.5.5
 title: closure mono
 file: ./test/gl_to_wasm/codegen_test.gleam
-test_name: type_graph_closure_test
+test_name: codegen_closure_test
 ---
 ---
 main: rec_main

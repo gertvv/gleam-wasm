@@ -1,0 +1,166 @@
+---
+version: 1.5.5
+title: global as closure mono
+file: ./test/gl_to_wasm/codegen_test.gleam
+test_name: codegen_global_as_closure_test
+---
+---
+main: rec_main
+types:
+- name: Nil
+  untyped_name: Nil
+  display_name: Nil
+  variants:
+  - name: Nil
+    untyped_name: Nil
+    display_name: Nil
+    fields:
+functions:
+- name: rec_main
+  environment:
+  parameters:
+  return:
+    kind: NamedType
+    id: String
+    parameters:
+  body:
+    kind: CallGlobal
+    type:
+      kind: NamedType
+      id: String
+      parameters:
+    id: rec_run_String
+    args:
+    - kind: BindClosure
+      type:
+        kind: FunctionType
+        parameters:
+        return:
+          kind: NamedType
+          id: String
+          parameters:
+      id: rec_hello_world
+      environment:
+- name: rec_hello_world
+  environment:
+  parameters:
+  return:
+    kind: NamedType
+    id: String
+    parameters:
+  body:
+    kind: CallGlobal
+    type:
+      kind: NamedType
+      id: String
+      parameters:
+    id: echo__String
+    args:
+    - kind: Literal
+      type:
+        kind: NamedType
+        id: String
+        parameters:
+      value: "String(Hello, World!)"
+- name: echo__String
+  environment:
+  parameters:
+  - name: value
+    type:
+      kind: NamedType
+      id: String
+      parameters:
+  return:
+    kind: NamedType
+    id: String
+    parameters:
+  body:
+    kind: Let
+    type:
+      kind: NamedType
+      id: String
+      parameters:
+    var: _
+    val:
+      kind: CallGlobal
+      type:
+        kind: NamedType
+        id: Nil
+        parameters:
+      id: print_string
+      args:
+      - kind: CallGlobal
+        type:
+          kind: NamedType
+          id: String
+          parameters:
+        id: inspect_String
+        args:
+        - kind: Local
+          type:
+            kind: NamedType
+            id: String
+            parameters:
+          var: value
+    exp:
+      kind: Let
+      type:
+        kind: NamedType
+        id: String
+        parameters:
+      var: _V1
+      val:
+        kind: CallGlobal
+        type:
+          kind: NamedType
+          id: Nil
+          parameters:
+        id: print_string
+        args:
+        - kind: Literal
+          type:
+            kind: NamedType
+            id: String
+            parameters:
+          value: "String(\\n)"
+      exp:
+        kind: Local
+        type:
+          kind: NamedType
+          id: String
+          parameters:
+        var: value
+- name: rec_run_String
+  environment:
+  parameters:
+  - name: f
+    type:
+      kind: FunctionType
+      parameters:
+      return:
+        kind: NamedType
+        id: String
+        parameters:
+  return:
+    kind: NamedType
+    id: String
+    parameters:
+  body:
+    kind: CallClosure
+    type:
+      kind: NamedType
+      id: String
+      parameters:
+    fun:
+      kind: Local
+      type:
+        kind: FunctionType
+        parameters:
+        return:
+          kind: NamedType
+          id: String
+          parameters:
+      var: f
+    args:
+externals:
+

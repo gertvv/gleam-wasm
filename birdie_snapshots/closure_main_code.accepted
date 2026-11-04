@@ -1,0 +1,33 @@
+---
+version: 1.5.5
+title: closure main code
+file: ./test/gl_to_wasm/codegen_test.gleam
+test_name: codegen_closure_test
+---
+(func (type 7)
+  (local (ref 1))
+  (local (ref 0))
+  (local (ref 1))
+  i32.const 0
+  i32.const 5
+  array.new 0
+  local.set 1
+  local.get 1
+  i32.const 0
+  i32.const 0
+  i32.const 5
+  array.init_data 0 0
+  i32.const 5
+  local.get 1
+  struct.new 4
+  call 5
+  local.set 0
+  local.get 0
+  local.set 2
+  local.get 2
+  struct.get 1 0
+  local.get 2
+  struct.get 1 1
+  ref.cast (ref 10)
+  call_ref 10
+  call 4)

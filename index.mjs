@@ -15,7 +15,7 @@ function print_string(offset, length) {
   process.stdout.write(string);
 }
 
-load('sayer.wasm', {
+load('global.wasm', {
   'host': {
     'print': print_string
   }

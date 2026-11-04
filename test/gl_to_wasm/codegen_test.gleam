@@ -137,7 +137,7 @@ pub fn type_graph_type_recursion_test() {
   |> birdie.snap("rectype type graph")
 }
 
-pub fn type_graph_closure_test() {
+pub fn codegen_closure_test() {
   let #(module, main) =
     mono_module_with_prelude(
       "rec",
@@ -154,7 +154,47 @@ pub fn type_graph_closure_test() {
   |> cymbal.encode
   |> birdie.snap("closure type graph")
   let assert Ok(wasm) = codegen.codegen(module, "rec", "rec_main")
+  let funcs = list_functions(wasm)
+
+  let assert Ok(func) = dict.get(funcs, "rec_main")
+  wasm.function_to_string(func)
+  |> birdie.snap("closure main code")
+
+  let assert Ok(func) = dict.get(funcs, "rec_sayer_String")
+  wasm.function_to_string(func)
+  |> birdie.snap("closure sayer code")
+
   wasm.emit_module(wasm, file_output_stream("sayer.wasm"))
+}
+
+pub fn codegen_global_as_closure_test() {
+  let #(module, main) =
+    mono_module_with_prelude(
+      "rec",
+      "fn hello_world() { echo \"Hello, World!\" } fn run(f) { f() } pub fn main() { run(hello_world) }",
+      "rec_main",
+    )
+
+  mono_to_yaml(#(module, main))
+  |> cymbal.encode
+  |> birdie.snap("global as closure mono")
+
+  let assert Ok(wasm) = codegen.codegen(module, "rec", "rec_main")
+  let funcs = list_functions(wasm)
+
+  let assert Ok(func) = dict.get(funcs, "rec_main")
+  wasm.function_to_string(func)
+  |> birdie.snap("global_as_closure main code")
+
+  let assert Ok(func) = dict.get(funcs, "rec_run_String")
+  wasm.function_to_string(func)
+  |> birdie.snap("global_as_closure run code")
+
+  let assert Ok(func) = dict.get(funcs, "Wrap$rec_hello_world")
+  wasm.function_to_string(func)
+  |> birdie.snap("global_as_closure wrapper code")
+
+  wasm.emit_module(wasm, file_output_stream("global.wasm"))
 }
 
 fn graph_to_yaml(

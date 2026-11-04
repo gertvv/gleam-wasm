@@ -1,0 +1,11 @@
+---
+version: 1.5.5
+title: global_as_closure main code
+file: ./test/gl_to_wasm/codegen_test.gleam
+test_name: codegen_global_as_closure_test
+---
+(func (type 7)
+  struct.new 2
+  ref.func 7
+  struct.new 1
+  call 6)
