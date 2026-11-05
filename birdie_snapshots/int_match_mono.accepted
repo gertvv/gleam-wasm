@@ -1,0 +1,248 @@
+---
+version: 1.5.5
+title: int_match mono
+file: ./test/gl_to_wasm/codegen_test.gleam
+test_name: codegen_int_match_test
+---
+---
+main: mod_main
+types:
+- name: Bool
+  untyped_name: Bool
+  display_name: Bool
+  variants:
+  - name: False
+    untyped_name: False
+    display_name: False
+    fields:
+  - name: True
+    untyped_name: True
+    display_name: True
+    fields:
+- name: Nil
+  untyped_name: Nil
+  display_name: Nil
+  variants:
+  - name: Nil
+    untyped_name: Nil
+    display_name: Nil
+    fields:
+functions:
+- name: mod_main
+  environment:
+  parameters:
+  return:
+    kind: NamedType
+    id: String
+    parameters:
+  body:
+    kind: Let
+    type:
+      kind: NamedType
+      id: String
+      parameters:
+    var: _
+    val:
+      kind: CallGlobal
+      type:
+        kind: NamedType
+        id: String
+        parameters:
+      id: echo__String
+      args:
+      - kind: CallGlobal
+        type:
+          kind: NamedType
+          id: String
+          parameters:
+        id: mod_prn
+        args:
+        - kind: Literal
+          type:
+            kind: NamedType
+            id: Int
+            parameters:
+          value: "Int(1)"
+    exp:
+      kind: CallGlobal
+      type:
+        kind: NamedType
+        id: String
+        parameters:
+      id: echo__String
+      args:
+      - kind: CallGlobal
+        type:
+          kind: NamedType
+          id: String
+          parameters:
+        id: mod_prn
+        args:
+        - kind: Literal
+          type:
+            kind: NamedType
+            id: Int
+            parameters:
+          value: "Int(3)"
+- name: mod_prn
+  environment:
+  parameters:
+  - name: n
+    type:
+      kind: NamedType
+      id: Int
+      parameters:
+  return:
+    kind: NamedType
+    id: String
+    parameters:
+  body:
+    kind: Let
+    type:
+      kind: NamedType
+      id: String
+      parameters:
+    var: S0
+    val:
+      kind: Local
+      type:
+        kind: NamedType
+        id: Int
+        parameters:
+      var: n
+    exp:
+      kind: If
+      type:
+        kind: NamedType
+        id: String
+        parameters:
+      cond:
+        kind: CallGlobal
+        type:
+          kind: NamedType
+          id: Bool
+          parameters:
+        id: eq_Int
+        args:
+        - kind: Local
+          type:
+            kind: NamedType
+            id: Int
+            parameters:
+          var: S0
+        - kind: Literal
+          type:
+            kind: NamedType
+            id: Int
+            parameters:
+          value: "Int(1)"
+      then_exp:
+        kind: Literal
+        type:
+          kind: NamedType
+          id: String
+          parameters:
+        value: "String(one)"
+      else_exp:
+        kind: If
+        type:
+          kind: NamedType
+          id: String
+          parameters:
+        cond:
+          kind: Literal
+          type:
+            kind: NamedType
+            id: Bool
+            parameters:
+          value: "Bool(True)"
+        then_exp:
+          kind: Literal
+          type:
+            kind: NamedType
+            id: String
+            parameters:
+          value: "String(not one)"
+        else_exp:
+          kind: Panic
+          type:
+            kind: NamedType
+            id: String
+            parameters:
+          value:
+            kind: Literal
+            type:
+              kind: NamedType
+              id: String
+              parameters:
+            value: "String(No matching clause in mod.prn)"
+- name: echo__String
+  environment:
+  parameters:
+  - name: value
+    type:
+      kind: NamedType
+      id: String
+      parameters:
+  return:
+    kind: NamedType
+    id: String
+    parameters:
+  body:
+    kind: Let
+    type:
+      kind: NamedType
+      id: String
+      parameters:
+    var: _
+    val:
+      kind: CallGlobal
+      type:
+        kind: NamedType
+        id: Nil
+        parameters:
+      id: print_string
+      args:
+      - kind: CallGlobal
+        type:
+          kind: NamedType
+          id: String
+          parameters:
+        id: inspect_String
+        args:
+        - kind: Local
+          type:
+            kind: NamedType
+            id: String
+            parameters:
+          var: value
+    exp:
+      kind: Let
+      type:
+        kind: NamedType
+        id: String
+        parameters:
+      var: _V1
+      val:
+        kind: CallGlobal
+        type:
+          kind: NamedType
+          id: Nil
+          parameters:
+        id: print_string
+        args:
+        - kind: Literal
+          type:
+            kind: NamedType
+            id: String
+            parameters:
+          value: "String(\\n)"
+      exp:
+        kind: Local
+        type:
+          kind: NamedType
+          id: String
+          parameters:
+        var: value
+externals:
+

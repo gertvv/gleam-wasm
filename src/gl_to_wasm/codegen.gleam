@@ -13,7 +13,6 @@ import gleam/pair
 import gleam/result
 import gleam/set
 import glexer
-import pprint
 import snag.{type Snag}
 
 // Notes on mono:
@@ -76,7 +75,6 @@ pub fn codegen(
       strings: dict.new(),
     )
   use ctx <- result.try(register_types(ctx) |> snag.context("register_types"))
-  pprint.debug(ctx.val_types |> dict.to_list)
   use ctx <- result.try(
     register_imports(ctx) |> snag.context("register_imports"),
   )
@@ -813,8 +811,27 @@ fn codegen_expr(
       {
         case val {
           core.NilVal -> todo
-          core.Bool(value: _) -> todo
-          core.Int(value: _) -> todo
+          core.Bool(value:) -> {
+            use int_val <- result.try(case value {
+              "False" -> Ok(0)
+              "True" -> Ok(1)
+              _ -> snag.error("Invalid bool literal: " <> value)
+            })
+            use int32 <- result.try(
+              wasm.int32_unsigned(int_val) |> to_snag("wasm.int32_unsigned"),
+            )
+            add_code(fb, [wasm.I32Const(int32)])
+          }
+          core.Int(value:) -> {
+            use int_val <- result.try(
+              int.parse(value)
+              |> snag.replace_error("Invalid int literal: " <> value),
+            )
+            use int64 <- result.try(
+              wasm.int64_signed(int_val) |> to_snag("wasm.int64_signed"),
+            )
+            add_code(fb, [wasm.I64Const(int64)])
+          }
           core.Float(value: _) -> todo
           core.String(value:) -> {
             // TODO: Ideally store string literals in a table
@@ -868,9 +885,16 @@ fn codegen_expr(
             codegen_expr(fb, arg, local_env, ctx)
           }),
         )
-        let assert Ok(f_idx) = dict.get(ctx.functions, id)
-          as { "Missing global function " <> id }
-        add_code(fb, [wasm.Call(f_idx)])
+        case id {
+          "eq_Int" -> {
+            add_code(fb, [wasm.I64Eq])
+          }
+          _ -> {
+            let assert Ok(f_idx) = dict.get(ctx.functions, id)
+              as { "Missing global function " <> id }
+            add_code(fb, [wasm.Call(f_idx)])
+          }
+        }
       }
       |> snag.context("CallGlobal " <> id)
     mono.BindClosure(typ: _, id:, environment:) ->
@@ -969,8 +993,30 @@ fn codegen_expr(
         codegen_expr(fb, exp, local_env, ctx)
       }
       |> snag.context("Let " <> var)
-    mono.If(typ: _, cond: _, then_exp: _, else_exp: _) -> todo
-    mono.Panic(typ: _, value: _) -> todo
+    mono.If(typ:, cond:, then_exp:, else_exp:) ->
+      {
+        let assert Ok(block_type_idx) = dict.get(ctx.val_types, map_type(typ))
+        use fb <- result.try(codegen_expr(fb, cond, local_env, ctx))
+        use fb <- result.try(
+          add_code(fb, [
+            wasm.If(
+              wasm.BlockValue(
+                wasm.Ref(wasm.NonNull(wasm.ConcreteType(block_type_idx))),
+              ),
+            ),
+          ]),
+        )
+        use fb <- result.try(codegen_expr(fb, then_exp, local_env, ctx))
+        use fb <- result.try(add_code(fb, [wasm.Else]))
+        use fb <- result.try(codegen_expr(fb, else_exp, local_env, ctx))
+        add_code(fb, [wasm.End])
+      }
+      |> snag.context("If")
+    mono.Panic(typ: _, value:) -> {
+      let assert Ok(echo_idx) = dict.get(ctx.functions, "echo__String")
+      use fb <- result.try(codegen_expr(fb, value, local_env, ctx))
+      add_code(fb, [wasm.Call(echo_idx), wasm.Unreachable])
+    }
   }
 }
 

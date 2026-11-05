@@ -197,6 +197,32 @@ pub fn codegen_global_as_closure_test() {
   wasm.emit_module(wasm, file_output_stream("global.wasm"))
 }
 
+pub fn codegen_int_match_test() {
+  let #(module, main) =
+    mono_module_with_prelude(
+      "mod",
+      "fn prn(n) { case n { 1 -> \"one\" _ -> \"not one\" } } fn main() { echo prn(1) echo prn(3) }",
+      "mod_main",
+    )
+
+  mono_to_yaml(#(module, main))
+  |> cymbal.encode
+  |> birdie.snap("int_match mono")
+
+  let assert Ok(wasm) = codegen.codegen(module, "mod", main)
+  let funcs = list_functions(wasm)
+
+  let assert Ok(func) = dict.get(funcs, main)
+  wasm.function_to_string(func)
+  |> birdie.snap("int_match main code")
+
+  let assert Ok(func) = dict.get(funcs, "mod_prn")
+  wasm.function_to_string(func)
+  |> birdie.snap("int_match prn code")
+
+  wasm.emit_module(wasm, file_output_stream("intmatch.wasm"))
+}
+
 fn graph_to_yaml(
   graph: graph.Graph(a),
   node_to_string: fn(a) -> String,

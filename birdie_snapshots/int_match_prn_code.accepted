@@ -1,0 +1,61 @@
+---
+version: 1.5.5
+title: int_match prn code
+file: ./test/gl_to_wasm/codegen_test.gleam
+test_name: codegen_int_match_test
+---
+(func (type 13)
+  (local i64)
+  (local (ref 0))
+  (local (ref 0))
+  (local (ref 0))
+  local.get 0
+  local.set 1
+  local.get 1
+  i64.const 1
+  i64.eq
+  if (result (ref 7))
+  i32.const 0
+  i32.const 3
+  array.new 0
+  local.set 2
+  local.get 2
+  i32.const 0
+  i32.const 0
+  i32.const 3
+  array.init_data 0 0
+  i32.const 3
+  local.get 2
+  struct.new 7
+  else
+  i32.const 1
+  if (result (ref 7))
+  i32.const 0
+  i32.const 7
+  array.new 0
+  local.set 3
+  local.get 3
+  i32.const 0
+  i32.const 3
+  i32.const 7
+  array.init_data 0 0
+  i32.const 7
+  local.get 3
+  struct.new 7
+  else
+  i32.const 0
+  i32.const 29
+  array.new 0
+  local.set 4
+  local.get 4
+  i32.const 0
+  i32.const 10
+  i32.const 29
+  array.init_data 0 0
+  i32.const 29
+  local.get 4
+  struct.new 7
+  call 5
+  unreachable
+  end
+  end)
