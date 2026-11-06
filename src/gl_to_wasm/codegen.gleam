@@ -277,7 +277,7 @@ fn find_builtin_instr(builtin_name) {
 }
 
 fn not_builtin(e: mono.External) -> Bool {
-  result.is_error(find_builtin_instr(e.internal_name))
+  result.is_error(find_builtin_instr(e.external_name))
 }
 
 fn register_function_types(ctx: Context) -> Result(Context, Snag) {

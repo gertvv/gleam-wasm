@@ -8,13 +8,16 @@ import gl_to_wasm/graph
 import gl_wasm/wasm
 import glance
 import glance_typed
+import gleam/bytes_tree
 import gleam/dict.{type Dict}
+import gleam/dynamic
 import gleam/list
 import gleam/option
 import gleam/order
 import gleam/result
 import gleam/string
 import simplifile
+import wasmex
 
 /// Parse, type check, lower, and monomorphize the given modules.
 /// modules: to be given in dependency order
@@ -45,6 +48,26 @@ fn mono_module_with_prelude(
   let assert Ok(prelude) =
     simplifile.read("./build/packages/gig/patch/gleam.gleam")
   mono_modules([#("gleam", prelude), #(module_name, source)], main_name)
+}
+
+fn compile_module_with_prelude(
+  module_name: String,
+  source: String,
+  main_name: String,
+) -> BitArray {
+  let #(module, main_name) =
+    mono_module_with_prelude(module_name, source, main_name)
+  let assert Ok(wasm) = codegen.codegen(module, module_name, main_name)
+  let assert Ok(bytes) = wasm.emit_module(wasm, bytes_tree_output_stream())
+  bytes_tree.to_bit_array(bytes)
+}
+
+fn bytes_tree_output_stream() -> wasm.OutputStream(bytes_tree.BytesTree, String) {
+  wasm.OutputStream(
+    stream: bytes_tree.new(),
+    write_bytes: fn(stream, bytes) { Ok(bytes_tree.append(stream, bytes)) },
+    close: fn(stream) { Ok(stream) },
+  )
 }
 
 fn file_output_stream(fname) {
@@ -239,6 +262,48 @@ pub fn codegen_bool_passing_test() {
   |> birdie.snap("bool_passing neg code")
 
   wasm.emit_module(wasm, file_output_stream("boolpassing.wasm"))
+}
+
+pub fn codegen_arithmetic_test() {
+  let bytes =
+    compile_module_with_prelude(
+      "mod",
+      "fn s(n) { { n * { n + 1 } } / 2 }",
+      "mod_s",
+    )
+  let assert Ok(pid) =
+    wasmex.start_link_simple(
+      bytes,
+      dict.from_list([
+        #(
+          "host",
+          dict.from_list([
+            #(
+              "print",
+              wasmex.Func(
+                [wasmex.I32, wasmex.I32],
+                [],
+                wasmex.Func2(do_not_print),
+              ),
+            ),
+          ]),
+        ),
+      ]),
+    )
+  [#(1, 1), #(2, 3), #(3, 6), #(4, 10), #(5, 15)]
+  |> list.each(fn(pair) {
+    let #(in, out) = pair
+    assert wasmex.call_function(pid, "mod_s", [wasmex.NumInt(in)], 50)
+      == Ok([wasmex.NumInt(out)])
+  })
+}
+
+fn do_not_print(
+  _: wasmex.CallContext,
+  _: dynamic.Dynamic,
+  _: dynamic.Dynamic,
+) -> dynamic.Dynamic {
+  dynamic.nil()
 }
 
 fn graph_to_yaml(

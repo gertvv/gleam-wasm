@@ -15,6 +15,7 @@ packages = [
   { name = "glance_typed", version = "1.0.0", build_tools = ["gleam"], requirements = ["birdie", "cymbal", "glance", "gleam_stdlib"], source = "git", repo = "https://github.com/schurhammer/glance_typed.git", commit = "e16b0a1a2ce5de07658b2f809b30e38cf3739457" },
   { name = "gleam_community_ansi", version = "1.4.4", build_tools = ["gleam"], requirements = ["gleam_community_colour", "gleam_regexp", "gleam_stdlib"], otp_app = "gleam_community_ansi", source = "hex", outer_checksum = "1B3AEA6074AB34D5F0674744F36DDC7290303A03295507E2DEC61EDD6F5777FE" },
   { name = "gleam_community_colour", version = "2.0.4", build_tools = ["gleam"], requirements = ["gleam_json", "gleam_stdlib"], otp_app = "gleam_community_colour", source = "hex", outer_checksum = "6DB4665555D7D2B27F0EA32EF47E8BEBC4303821765F9C73D483F38EE24894F0" },
+  { name = "gleam_erlang", version = "1.3.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "gleam_erlang", source = "hex", outer_checksum = "1124AD3AA21143E5AF0FC5CF3D9529F6DB8CA03E43A55711B60B6B7B3874375C" },
   { name = "gleam_json", version = "3.1.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "gleam_json", source = "hex", outer_checksum = "44FDAA8847BE8FC48CA7A1C089706BD54BADCC4C45B237A992EDDF9F2CDB2836" },
   { name = "gleam_regexp", version = "1.1.1", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "gleam_regexp", source = "hex", outer_checksum = "9C215C6CA84A5B35BB934A9B61A9A306EC743153BE2B0425A0D032E477B062A9" },
   { name = "gleam_stdlib", version = "0.69.0", build_tools = ["gleam"], requirements = [], otp_app = "gleam_stdlib", source = "hex", outer_checksum = "AAB0962BEBFAA67A2FBEE9EEE218B057756808DC9AF77430F5182C6115B3A315" },
@@ -24,9 +25,12 @@ packages = [
   { name = "glexer", version = "2.3.1", build_tools = ["gleam"], requirements = ["gleam_stdlib", "splitter"], otp_app = "glexer", source = "hex", outer_checksum = "41D8D2E855AEA87ADC94B7AF26A5FEA3C90268D4CF2CCBBD64FD6863714EE085" },
   { name = "global_value", version = "1.0.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "global_value", source = "hex", outer_checksum = "23F74C91A7B819C43ABCCBF49DAD5BB8799D81F2A3736BA9A534BD47F309FF4F" },
   { name = "ieee_float", version = "1.6.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "ieee_float", source = "hex", outer_checksum = "12F65F0688AC1EA3826DDFB674E665D0C6E53A8AA3D346848222C55DB32CFAB1" },
+  { name = "jason", version = "1.4.5", build_tools = ["mix"], requirements = ["decimal"], otp_app = "jason", source = "hex", outer_checksum = "B0C823996102BCD0239B3C2444EB00409B72F6A140C1950BC8B457D836B30684" },
   { name = "justin", version = "1.1.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "justin", source = "hex", outer_checksum = "8B1C62269E8607D0A0ED698B7903984CE0BF7B6B3C0DEA3C6C8302B39402837B" },
   { name = "pprint", version = "1.0.6", build_tools = ["gleam"], requirements = ["glam", "gleam_stdlib"], otp_app = "pprint", source = "hex", outer_checksum = "4E9B34AE03B2E81D60F230B9BAF1792BE1AC37AFB5564B8DEBEE56BAEC866B7D" },
   { name = "rank", version = "1.0.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "rank", source = "hex", outer_checksum = "5660E361F0E49CBB714CC57CC4C89C63415D8986F05B2DA0C719D5642FAD91C9" },
+  { name = "rustler", version = "0.38.0", build_tools = ["mix"], requirements = ["jason"], otp_app = "rustler", source = "hex", outer_checksum = "704C03C1BF66BE12B031C5A389347B91C81C5CB819A24B068B0DE36FE4A5652A" },
+  { name = "rustler_precompiled", version = "0.10.1", build_tools = ["mix"], requirements = ["rustler"], otp_app = "rustler_precompiled", source = "hex", outer_checksum = "0EFA66BC2A4206AEC64A2C422CA0B1D69BDC411C7B359EC928FEB889357B4ABB" },
   { name = "shellout", version = "1.8.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "shellout", source = "hex", outer_checksum = "C416356D45151F298108C9DB9CD1EDE0313F620B5EDBB5766CD7237659D87841" },
   { name = "simplifile", version = "2.7.0", build_tools = ["gleam"], requirements = ["filepath", "gleam_stdlib"], otp_app = "simplifile", source = "hex", outer_checksum = "A2727627B063E87351934C7F7F008F2D1FDB16F6DE0B8C79F9E46459CFC9C164" },
   { name = "snag", version = "1.2.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "snag", source = "hex", outer_checksum = "274F41D6C3ECF99F7686FDCE54183333E41D2C1CA5A3A673F9A8B2C7A4401077" },
@@ -34,6 +38,7 @@ packages = [
   { name = "term_size", version = "1.0.1", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "term_size", source = "hex", outer_checksum = "D00BD2BC8FB3EBB7E6AE076F3F1FF2AC9D5ED1805F004D0896C784D06C6645F1" },
   { name = "tom", version = "2.0.1", build_tools = ["gleam"], requirements = ["gleam_stdlib", "gleam_time"], otp_app = "tom", source = "hex", outer_checksum = "90791DA4AACE637E30081FE77049B8DB850FBC8CACC31515376BCC4E59BE1DD2" },
   { name = "trie_again", version = "1.1.4", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "trie_again", source = "hex", outer_checksum = "E3BD66B4E126EF567EA8C4944EAB216413392ADF6C16C36047AF79EE5EF13466" },
+  { name = "wasmex", version = "0.16.0", build_tools = ["mix"], requirements = ["rustler", "rustler_precompiled"], otp_app = "wasmex", source = "hex", outer_checksum = "80818435DE82651162923D173F7EE01C2B96203B1A6B83C2816AA0BC2B861FDA" },
 ]
 
 [requirements]
@@ -44,9 +49,11 @@ filepath = { version = ">= 1.0.0 and < 2.0.0" }
 gig = { git = "https://github.com/gertvv/gig.git", ref = "c4b0c9c82bb13b9937e24c5ebbb256156e78514e" }
 gl_wasm = { path = "../gl_wasm" }
 glance_typed = { git = "https://github.com/schurhammer/glance_typed.git", ref = "e16b0a1a2ce5de07658b2f809b30e38cf3739457" }
+gleam_erlang = { version = ">= 1.3.0 and < 2.0.0" }
 gleam_stdlib = { version = ">= 0.69.0 and < 1.0.0" }
 gleeunit = { version = "~> 1.0" }
 pprint = { version = ">= 1.0.4 and < 2.0.0" }
 simplifile = { version = ">= 2.7.0 and < 3.0.0" }
 snag = { version = ">= 1.1.0 and < 2.0.0" }
 tom = { version = ">= 2.0.1 and < 3.0.0" }
+wasmex = { version = ">= 0.16.0 and < 1.0.0" }
