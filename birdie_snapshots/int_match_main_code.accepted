@@ -4,11 +4,11 @@ title: int_match main code
 file: ./test/gl_to_wasm/codegen_test.gleam
 test_name: codegen_int_match_test
 ---
-(func (type 12)
+(func (type 9)
   i64.const 1
-  call 4
   call 5
+  call 6
   drop
   i64.const 3
-  call 4
-  call 5)
+  call 5
+  call 6)

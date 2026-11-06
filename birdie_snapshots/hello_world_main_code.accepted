@@ -18,4 +18,4 @@ test_name: codegen_hello_world_test
   i32.const 13
   local.get 0
   struct.new 4
-  call 4)
+  call 5)

@@ -6,6 +6,6 @@ test_name: codegen_global_as_closure_test
 ---
 (func (type 7)
   struct.new 2
-  ref.func 7
+  ref.func 8
   struct.new 1
-  call 6)
+  call 7)

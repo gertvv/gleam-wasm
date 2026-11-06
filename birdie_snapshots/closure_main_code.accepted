@@ -20,7 +20,7 @@ test_name: codegen_closure_test
   i32.const 5
   local.get 1
   struct.new 4
-  call 5
+  call 6
   local.set 0
   local.get 0
   local.set 2
@@ -30,4 +30,4 @@ test_name: codegen_closure_test
   struct.get 1 1
   ref.cast (ref 10)
   call_ref 10
-  call 4)
+  call 5)

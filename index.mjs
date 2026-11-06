@@ -15,7 +15,7 @@ function print_string(offset, length) {
   process.stdout.write(string);
 }
 
-load('intmatch.wasm', {
+load('boolpassing.wasm', {
   'host': {
     'print': print_string
   }

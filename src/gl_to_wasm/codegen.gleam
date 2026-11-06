@@ -12,15 +12,14 @@ import gleam/option.{None, Some}
 import gleam/pair
 import gleam/result
 import gleam/set
+import gleam/string
 import glexer
 import snag.{type Snag}
 
 // Notes on mono:
 //  - it would be nice to extract the types that aren't constructed within Gleam's type system
 //    (String, BitArray, Int, Float, UtfCodePoint, perhaps Bool & Nil)
-//  - the fact that builtin functions are omitted is awkward
-
-// !!! TODO: functions (and expressions?) that return a FunctionType should now actually return Closure
+//  - the fact that builtin functions are omitted is awkward (and some are externals)
 
 pub type ValType {
   // True closures take an environment struct as their first argument, which
@@ -141,9 +140,11 @@ fn register_data(ctx: Context) -> Result(Context, Snag) {
 }
 
 fn find_string_literals(module: mono.Context) -> List(String) {
+  // TODO: make string literals for all types
   list.flat_map(module.functions, fn(func) {
     find_string_literals_exp(func.body)
   })
+  |> list.append(["True", "False"])
 }
 
 fn find_string_literals_exp(exp: mono.Exp) -> List(String) {
@@ -192,6 +193,9 @@ fn register_types(ctx: Context) -> Result(Context, Snag) {
       && group != [NamedType("Int")]
       && group != [NamedType("Float")]
       && group != [NamedType("UtfCodepoint")]
+      && group != [NamedType("Bool")]
+      && group != [NamedTypeVariant("Bool", "False")]
+      && group != [NamedTypeVariant("Bool", "True")]
     })
 
   // byte array is an implementation detail
@@ -236,6 +240,46 @@ fn register_types(ctx: Context) -> Result(Context, Snag) {
   Ok(ctx)
 }
 
+const builtin_instr = [
+  #("and_bool", wasm.I32And),
+  #("or_bool", wasm.I32Or),
+  #("negate_bool", wasm.I32EqZ),
+  #("eq_Int", wasm.I64Eq),
+  #("lt_Int", wasm.I64LtS),
+  #("gt_Int", wasm.I64GtS),
+  #("lte_Int", wasm.I64LeS),
+  #("gte_Int", wasm.I64GeS),
+  #("add_Int", wasm.I64Add),
+  #("sub_Int", wasm.I64Sub),
+  #("mul_Int", wasm.I64Mul),
+  #("div_Int", wasm.I64DivS),
+  #("rem_Int", wasm.I64RemS),
+  #("negate_Int", wasm.I64EqZ),
+  #("eq_Float", wasm.F64Eq),
+  #("lt_Float", wasm.F64Lt),
+  #("gt_Float", wasm.F64Gt),
+  #("lte_Float", wasm.F64Le),
+  #("gte_Float", wasm.F64Ge),
+  #("add_Float", wasm.F64Add),
+  #("sub_Float", wasm.F64Sub),
+  #("mul_Float", wasm.F64Mul),
+  #("div_Float", wasm.F64Div),
+]
+
+fn find_builtin_instr(builtin_name) {
+  list.find_map(builtin_instr, fn(builtin) {
+    let #(name, instr) = builtin
+    case name == builtin_name {
+      True -> Ok(instr)
+      False -> Error(Nil)
+    }
+  })
+}
+
+fn not_builtin(e: mono.External) -> Bool {
+  result.is_error(find_builtin_instr(e.internal_name))
+}
+
 fn register_function_types(ctx: Context) -> Result(Context, Snag) {
   let module = ctx.module
 
@@ -244,6 +288,7 @@ fn register_function_types(ctx: Context) -> Result(Context, Snag) {
   // TODO: should get builtins from mono!
   let builtin_types = [
     FunType([NamedType("String")], NamedType("String")),
+    FunType([NamedType("Bool")], NamedType("String")),
     FunType([NamedType("String")], NamedType("Nil")),
   ]
   let func_types =
@@ -251,7 +296,8 @@ fn register_function_types(ctx: Context) -> Result(Context, Snag) {
       list.map(ct.variants, map_constructor_type(ct, _))
     })
     |> list.append(
-      list.map(module.externals, fn(ext) { map_external_type(ext.typ) }),
+      list.filter(module.externals, not_builtin)
+      |> list.map(fn(ext) { map_external_type(ext.typ) }),
     )
     |> list.append(list.map(module.functions, map_func_type))
     |> list.append(list.map(need_wrapping, map_wrap_type(module, _)))
@@ -475,7 +521,7 @@ fn generate_variant_type(
     list.find(ctx.module.types, fn(t) { t.name == type_name })
     |> result.replace_error(snag.new("CustomType " <> type_name <> " not found")),
   )
-  let assert Ok(idx) = dict.get(ctx.val_types, NamedType(def.name))
+  let assert Ok(idx) = dict.get(ctx.val_types, NamedType(def.name)) as def.name
   use variant <- result.map(
     list.find(def.variants, fn(v) { v.name == variant_name })
     |> result.replace_error(snag.new("Variant " <> variant_name <> " not found")),
@@ -533,6 +579,8 @@ pub fn val_type_to_string(t: ValType) {
 fn wasm_value_type(ctx: Context, t: ValType) -> wasm.ValueType {
   case t {
     AbstractEnv -> wasm.Ref(wasm.NonNull(wasm.AbstractAny))
+    NamedType(name: "Bool") | NamedTypeVariant(type_name: "Bool", ..) ->
+      wasm.I32
     NamedType(name: "Int") -> wasm.I64
     NamedType(name: "Float") -> wasm.F64
     NamedType(name: "UtfCodepoint") -> wasm.I32
@@ -615,8 +663,9 @@ fn map_type(typ: mono.Type) -> ValType {
 // === Register imports ===
 
 fn register_imports(ctx: Context) -> Result(Context, Snag) {
+  let externals = list.filter(ctx.module.externals, not_builtin)
   use mb <- result.map(
-    list.try_fold(ctx.module.externals, ctx.mb, fn(mb, external) {
+    list.try_fold(externals, ctx.mb, fn(mb, external) {
       let assert Ok(f_type_idx) =
         dict.get(ctx.fun_types, map_external_type(external.typ))
       wasm.import_function(
@@ -630,7 +679,7 @@ fn register_imports(ctx: Context) -> Result(Context, Snag) {
   )
 
   let functions =
-    list.index_map(ctx.module.externals, fn(external, idx) {
+    list.index_map(externals, fn(external, idx) {
       #(external.internal_name, idx)
     })
     |> dict.from_list
@@ -833,40 +882,7 @@ fn codegen_expr(
             add_code(fb, [wasm.I64Const(int64)])
           }
           core.Float(value: _) -> todo
-          core.String(value:) -> {
-            // TODO: Ideally store string literals in a table
-            let assert Ok(type_index) =
-              dict.get(ctx.val_types, NamedType("String"))
-            let assert Ok(value) = glexer.unescape_string(value)
-            let assert Ok(#(offset, size)) = dict.get(ctx.strings, value)
-            let assert Ok(offset) = wasm.int32_unsigned(offset)
-            let assert Ok(size) = wasm.int32_unsigned(size)
-            use #(fb, bytes_idx) <- result.try(
-              wasm.add_local(
-                fb,
-                wasm.Ref(wasm.NonNull(wasm.ConcreteType(byte_array_index))),
-                Some("bytes"),
-              )
-              |> to_snag("wasm.add_local"),
-            )
-            let assert Ok(zero) = wasm.int32_unsigned(0)
-            add_code(fb, [
-              wasm.I32Const(zero),
-              // initialize the bytes
-              wasm.I32Const(size),
-              wasm.ArrayNew(byte_array_index),
-              wasm.LocalSet(bytes_idx),
-              wasm.LocalGet(bytes_idx),
-              wasm.I32Const(zero),
-              wasm.I32Const(offset),
-              wasm.I32Const(size),
-              wasm.ArrayInitData(byte_array_index, 0),
-              // create the String struct
-              wasm.I32Const(size),
-              wasm.LocalGet(bytes_idx),
-              wasm.StructNew(type_index),
-            ])
-          }
+          core.String(value:) -> make_string_literal(ctx, fb, value)
           core.BitArray(size: _) -> todo
         }
       }
@@ -885,10 +901,8 @@ fn codegen_expr(
             codegen_expr(fb, arg, local_env, ctx)
           }),
         )
-        case id {
-          "eq_Int" -> {
-            add_code(fb, [wasm.I64Eq])
-          }
+        case find_builtin_instr(id) {
+          Ok(instr) -> add_code(fb, [instr])
           _ -> {
             let assert Ok(f_idx) = dict.get(ctx.functions, id)
               as { "Missing global function " <> id }
@@ -995,15 +1009,11 @@ fn codegen_expr(
       |> snag.context("Let " <> var)
     mono.If(typ:, cond:, then_exp:, else_exp:) ->
       {
-        let assert Ok(block_type_idx) = dict.get(ctx.val_types, map_type(typ))
+        let block_type = wasm_value_type(ctx, map_type(typ))
         use fb <- result.try(codegen_expr(fb, cond, local_env, ctx))
         use fb <- result.try(
           add_code(fb, [
-            wasm.If(
-              wasm.BlockValue(
-                wasm.Ref(wasm.NonNull(wasm.ConcreteType(block_type_idx))),
-              ),
-            ),
+            wasm.If(wasm.BlockValue(block_type)),
           ]),
         )
         use fb <- result.try(codegen_expr(fb, then_exp, local_env, ctx))
@@ -1013,11 +1023,49 @@ fn codegen_expr(
       }
       |> snag.context("If")
     mono.Panic(typ: _, value:) -> {
-      let assert Ok(echo_idx) = dict.get(ctx.functions, "echo__String")
+      let assert Ok(echo_idx) = dict.get(ctx.functions, "print_string")
       use fb <- result.try(codegen_expr(fb, value, local_env, ctx))
       add_code(fb, [wasm.Call(echo_idx), wasm.Unreachable])
     }
   }
+}
+
+fn make_string_literal(
+  ctx: Context,
+  fb: wasm.CodeBuilder,
+  value: String,
+) -> Result(wasm.CodeBuilder, Snag) {
+  // TODO: Ideally store string literals in a table
+  let assert Ok(type_index) = dict.get(ctx.val_types, NamedType("String"))
+  let assert Ok(value) = glexer.unescape_string(value)
+  let assert Ok(#(offset, size)) = dict.get(ctx.strings, value)
+  let assert Ok(offset) = wasm.int32_unsigned(offset)
+  let assert Ok(size) = wasm.int32_unsigned(size)
+  use #(fb, bytes_idx) <- result.try(
+    wasm.add_local(
+      fb,
+      wasm.Ref(wasm.NonNull(wasm.ConcreteType(byte_array_index))),
+      Some("bytes"),
+    )
+    |> to_snag("wasm.add_local"),
+  )
+  let assert Ok(zero) = wasm.int32_unsigned(0)
+  add_code(fb, [
+    wasm.I32Const(zero),
+    // initialize the bytes
+    wasm.I32Const(size),
+    wasm.ArrayNew(byte_array_index),
+    wasm.LocalSet(bytes_idx),
+    wasm.LocalGet(bytes_idx),
+    wasm.I32Const(zero),
+    wasm.I32Const(offset),
+    wasm.I32Const(size),
+    wasm.ArrayInitData(byte_array_index, 0),
+    // create the String struct
+    wasm.I32Const(size),
+    wasm.LocalGet(bytes_idx),
+    wasm.StructNew(type_index),
+  ])
 }
 
 // === built-in functions ===
@@ -1057,6 +1105,11 @@ fn build_builtins(ctx: Context) -> Result(Context, Snag) {
       "print_string",
       FunType([NamedType("String")], NamedType("Nil")),
       build_print_string,
+    ),
+    #(
+      "inspect_Bool",
+      FunType([NamedType("Bool")], NamedType("String")),
+      build_inspect_bool,
     ),
   ]
   use ctx <- result.try(
@@ -1182,4 +1235,18 @@ fn build_inspect_string(
     wasm.LocalGet(0),
     wasm.End,
   ])
+}
+
+fn build_inspect_bool(
+  fb: wasm.CodeBuilder,
+  ctx: Context,
+) -> Result(wasm.CodeBuilder, Snag) {
+  let string_type = wasm_value_type(ctx, NamedType("String"))
+  use fb <- result.try(
+    add_code(fb, [wasm.LocalGet(0), wasm.If(wasm.BlockValue(string_type))]),
+  )
+  use fb <- result.try(make_string_literal(ctx, fb, "True"))
+  use fb <- result.try(add_code(fb, [wasm.Else]))
+  use fb <- result.try(make_string_literal(ctx, fb, "False"))
+  add_code(fb, [wasm.End, wasm.End])
 }

@@ -223,6 +223,24 @@ pub fn codegen_int_match_test() {
   wasm.emit_module(wasm, file_output_stream("intmatch.wasm"))
 }
 
+pub fn codegen_bool_passing_test() {
+  let #(module, main) =
+    mono_module_with_prelude(
+      "mod",
+      "fn neg(b) { case b { True -> False False -> True } } fn main() { echo neg(False) }",
+      "mod_main",
+    )
+
+  let assert Ok(wasm) = codegen.codegen(module, "mod", main)
+  let funcs = list_functions(wasm)
+
+  let assert Ok(func) = dict.get(funcs, "mod_neg")
+  wasm.function_to_string(func)
+  |> birdie.snap("bool_passing neg code")
+
+  wasm.emit_module(wasm, file_output_stream("boolpassing.wasm"))
+}
+
 fn graph_to_yaml(
   graph: graph.Graph(a),
   node_to_string: fn(a) -> String,
