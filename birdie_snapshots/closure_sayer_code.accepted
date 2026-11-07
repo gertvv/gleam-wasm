@@ -7,5 +7,5 @@ test_name: codegen_closure_test
 (func (type 9)
   local.get 0
   struct.new 13
-  ref.func 7
+  ref.func 8
   struct.new 1)

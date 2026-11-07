@@ -6,7 +6,6 @@ test_name: codegen_bool_passing_test
 ---
 (func (type 10)
   (local i32)
-  (local (ref 0))
   local.get 0
   local.set 1
   local.get 1
@@ -19,18 +18,13 @@ test_name: codegen_bool_passing_test
   i32.const 1
   else
   i32.const 0
-  i32.const 29
-  array.new 0
-  local.set 2
-  local.get 2
+  table.get 0
+  array.len
   i32.const 0
-  i32.const 0
-  i32.const 29
-  array.init_data 0 0
-  i32.const 29
-  local.get 2
+  table.get 0
+  ref.as_non_null
   struct.new 4
-  call 2
+  call 3
   unreachable
   end
   end)

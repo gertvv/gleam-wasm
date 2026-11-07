@@ -5,4 +5,4 @@ file: ./test/gl_to_wasm/codegen_test.gleam
 test_name: codegen_global_as_closure_test
 ---
 (func (type 10)
-  call 5)
+  call 6)

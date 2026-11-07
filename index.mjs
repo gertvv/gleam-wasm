@@ -15,12 +15,12 @@ function print_string(offset, length) {
   process.stdout.write(string);
 }
 
-load('boolpassing.wasm', {
+load('hello.wasm', {
   'host': {
     'print': print_string
   }
 }).then(module => {
-  const hello = module.instance.exports.mod_main;
+  const hello = module.instance.exports.hello_main;
   memory = module.instance.exports.memory.buffer;
   hello();
 })

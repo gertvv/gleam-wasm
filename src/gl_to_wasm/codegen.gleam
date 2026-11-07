@@ -49,7 +49,7 @@ type Context {
     functions: Dict(String, Int),
     need_wrapping: List(String),
     module: mono.Context,
-    strings: Dict(String, #(Int, Int)),
+    strings: Dict(String, Int),
   )
 }
 
@@ -77,14 +77,14 @@ pub fn codegen(
   use ctx <- result.try(
     register_imports(ctx) |> snag.context("register_imports"),
   )
-  use ctx <- result.try(register_data(ctx))
+  use ctx <- result.try(register_string_data(ctx))
   use ctx <- result.try(build_builtins(ctx) |> snag.context("build_builtins"))
   use ctx <- result.try(
     register_functions(ctx) |> snag.context("register_functions"),
   )
   use ctx <- result.try(build_functions(ctx) |> snag.context("build_functions"))
   use ctx <- result.try(build_wrappers(ctx) |> snag.context("build_wrappers"))
-  use ctx <- result.try(register_elements(ctx))
+  use ctx <- result.try(register_functions_elements(ctx))
   register_exports(ctx, main_name) |> snag.context("register_exports")
 }
 
@@ -101,7 +101,7 @@ fn add_code(
   })
 }
 
-fn register_elements(ctx: Context) -> Result(Context, Snag) {
+fn register_functions_elements(ctx: Context) -> Result(Context, Snag) {
   // Closures will be called by reference. For that, they will need to be declared outside the code
   // section first. We use an `(elem declare func $f)` but for that. 
   // Currently all functions are added, whether they are called by reference or not.
@@ -120,21 +120,81 @@ fn register_elements(ctx: Context) -> Result(Context, Snag) {
   Context(..ctx, mb:)
 }
 
-fn register_data(ctx: Context) -> Result(Context, Snag) {
+fn register_string_data(ctx: Context) -> Result(Context, Snag) {
   let string_literals = find_string_literals(ctx.module)
-  let #(data, _, strings) =
-    list.fold(string_literals, #(bytes_tree.new(), 0, dict.new()), fn(acc, str) {
-      let assert Ok(str) = glexer.unescape_string(str)
-      let #(data, offset, index) = acc
-      use <- bool.guard(result.is_ok(dict.get(index, str)), acc)
-      let bytes = bit_array.from_string(str)
-      let size = bit_array.byte_size(bytes)
-      let data = bytes_tree.append(data, bytes)
-      #(data, offset + size, dict.insert(index, str, #(offset, size)))
-    })
-  use mb <- result.map(
+  // de-duplicate and linearize strings
+  let #(data, _, n, sizes, strings) =
+    list.fold(
+      string_literals,
+      #(bytes_tree.new(), 0, 0, [], dict.new()),
+      fn(acc, str) {
+        let assert Ok(str) = glexer.unescape_string(str)
+        let #(data, offset, n, sizes, index) = acc
+        use <- bool.guard(result.is_ok(dict.get(index, str)), acc)
+        let bytes = bit_array.from_string(str)
+        let size = bit_array.byte_size(bytes)
+        let data = bytes_tree.append(data, bytes)
+        #(
+          data,
+          offset + size,
+          n + 1,
+          [size, ..sizes],
+          dict.insert(index, str, n),
+        )
+      },
+    )
+  let sizes = list.reverse(sizes)
+  // Add a data segment containing the string bytes
+  use mb <- result.try(
     wasm.add_passive_data(ctx.mb, bytes_tree.to_bit_array(data))
     |> to_snag("wasm.add_passive_data"),
+  )
+  // Create a table of byte arrays to hold the strings
+  use mb <- result.try(
+    wasm.add_table_default(
+      mb,
+      wasm.Limits(n, Some(n)),
+      wasm.ConcreteType(byte_array_index),
+    )
+    |> to_snag("wasm.add_table_default"),
+  )
+  // Create an element segment containing byte arrays of the correct size,
+  // which will initialize the table to (zero) byte arrays.
+  // A start functions will copy the bytes from the data segment into these.
+  use ob <- result.try(
+    wasm.create_active_element_offset_builder_for_element_builder(
+      mb,
+      wasm.Nullable(wasm.ConcreteType(byte_array_index)),
+      0,
+    )
+    |> to_snag("wasm.create_active_element_offset_builder_for_element_builder"),
+  )
+  let assert Ok(zero) = wasm.int32_unsigned(0)
+  use ob <- result.try(add_code(ob, [wasm.I32Const(zero), wasm.End]))
+  use eb <- result.try(
+    wasm.finalize_active_element_offset_for_element_builder(ob)
+    |> to_snag("wasm.finalize_active_element_offset_for_element_builder"),
+  )
+  use eb <- result.try(
+    list.try_fold(sizes, eb, fn(eb, size) {
+      use ib <- result.try(
+        wasm.create_element_initializer_builder(eb)
+        |> to_snag("wasm.create_element_initializer_builder"),
+      )
+      let assert Ok(size) = wasm.int32_unsigned(size)
+      use ib <- result.try(
+        add_code(ib, [
+          wasm.I32Const(size),
+          wasm.ArrayNewDefault(byte_array_index),
+          wasm.End,
+        ]),
+      )
+      wasm.finalize_element_initializer(eb, ib)
+      |> to_snag("wasm.finalize_element_builder")
+    }),
+  )
+  use mb <- result.map(
+    wasm.finalize_element(mb, eb) |> to_snag("wasm.finalize_element"),
   )
   Context(..ctx, mb:, strings:)
 }
@@ -1038,32 +1098,17 @@ fn make_string_literal(
   // TODO: Ideally store string literals in a table
   let assert Ok(type_index) = dict.get(ctx.val_types, NamedType("String"))
   let assert Ok(value) = glexer.unescape_string(value)
-  let assert Ok(#(offset, size)) = dict.get(ctx.strings, value)
-  let assert Ok(offset) = wasm.int32_unsigned(offset)
-  let assert Ok(size) = wasm.int32_unsigned(size)
-  use #(fb, bytes_idx) <- result.try(
-    wasm.add_local(
-      fb,
-      wasm.Ref(wasm.NonNull(wasm.ConcreteType(byte_array_index))),
-      Some("bytes"),
-    )
-    |> to_snag("wasm.add_local"),
-  )
-  let assert Ok(zero) = wasm.int32_unsigned(0)
+  let assert Ok(bytes_idx) = dict.get(ctx.strings, value)
+  let assert Ok(bytes_idx) = wasm.int32_unsigned(bytes_idx)
   add_code(fb, [
-    wasm.I32Const(zero),
-    // initialize the bytes
-    wasm.I32Const(size),
-    wasm.ArrayNew(byte_array_index),
-    wasm.LocalSet(bytes_idx),
-    wasm.LocalGet(bytes_idx),
-    wasm.I32Const(zero),
-    wasm.I32Const(offset),
-    wasm.I32Const(size),
-    wasm.ArrayInitData(byte_array_index, 0),
-    // create the String struct
-    wasm.I32Const(size),
-    wasm.LocalGet(bytes_idx),
+    // TODO: decide if the first struct member should be the byte size or the
+    // string length
+    wasm.I32Const(bytes_idx),
+    wasm.TableGet(string_table_idx),
+    wasm.ArrayLen,
+    wasm.I32Const(bytes_idx),
+    wasm.TableGet(string_table_idx),
+    wasm.RefAsNonNull,
     wasm.StructNew(type_index),
   ])
 }
@@ -1092,6 +1137,31 @@ fn build_builtins(ctx: Context) -> Result(Context, Snag) {
   use mb <- result.try(
     wasm.add_memory(mb, 1, None)
     |> to_snag("wasm.add_memory"),
+  )
+  // create start function (initialize string data)
+  let start_type = wasm.Func(name: None, params: [], result: [])
+  use #(mb, start_type_idx) <- result.try(
+    wasm.add_type(mb, start_type) |> to_snag("wasm.add_type(start_type)"),
+  )
+  use #(mb, fb) <- result.try(
+    wasm.create_function_builder(
+      mb,
+      wasm.FunctionSignature(start_type_idx, Some("init_str_table"), None),
+    )
+    |> to_snag("wasm.create_function_builder"),
+  )
+  use fb <- result.try(
+    build_init_string_table(fb) |> snag.context("build init_str_table"),
+  )
+  use mb <- result.try(
+    wasm.finalize_function(mb, fb)
+    |> to_snag("wasm.finalize_function(init_str_table)"),
+  )
+  let start_fun_idx = dict.size(functions)
+  let functions = dict.insert(functions, "__init_str_table", start_fun_idx)
+  use mb <- result.try(
+    wasm.set_start_function(mb, start_fun_idx)
+    |> to_snag("wasm.set_start_function"),
   )
   // create built-ins
   let ctx = Context(..ctx, mb:, functions:)
@@ -1153,7 +1223,69 @@ fn build_builtins(ctx: Context) -> Result(Context, Snag) {
   Context(..ctx, mb:)
 }
 
+fn build_init_string_table(
+  fb: wasm.CodeBuilder,
+) -> Result(wasm.CodeBuilder, Snag) {
+  use #(fb, start_idx) <- result.try(
+    wasm.add_local(fb, wasm.I32, Some("start")) |> to_snag("wasm.add_local"),
+  )
+  use #(fb, index_idx) <- result.try(
+    wasm.add_local(fb, wasm.I32, Some("index")) |> to_snag("wasm.add_local"),
+  )
+  use #(fb, bytes_idx) <- result.try(
+    wasm.add_local(
+      fb,
+      wasm.Ref(wasm.NonNull(wasm.ConcreteType(byte_array_index))),
+      Some("bytes"),
+    )
+    |> to_snag("wasm.add_local"),
+  )
+  let assert Ok(zero) = wasm.int32_unsigned(0)
+  let assert Ok(one) = wasm.int32_unsigned(1)
+  add_code(fb, [
+    wasm.Block(wasm.BlockEmpty),
+    wasm.Loop(wasm.BlockEmpty),
+    // break out of loop if beyond bounds of the data segment
+    wasm.LocalGet(index_idx),
+    wasm.TableSize(string_table_idx),
+    wasm.I32GeU,
+    wasm.BranchIf(1),
+    // get a reference to the byte array to initialize
+    wasm.LocalGet(index_idx),
+    wasm.TableGet(string_table_idx),
+    wasm.RefAsNonNull,
+    wasm.LocalSet(bytes_idx),
+    // initialize the byte array from the data segment
+    wasm.LocalGet(bytes_idx),
+    wasm.I32Const(zero),
+    wasm.LocalGet(start_idx),
+    wasm.LocalGet(bytes_idx),
+    wasm.ArrayLen,
+    wasm.ArrayInitData(byte_array_index, string_data_idx),
+    // increment start and index
+    wasm.LocalGet(start_idx),
+    wasm.LocalGet(bytes_idx),
+    wasm.ArrayLen,
+    wasm.I32Add,
+    wasm.LocalSet(start_idx),
+    wasm.LocalGet(index_idx),
+    wasm.I32Const(one),
+    wasm.I32Add,
+    wasm.LocalSet(index_idx),
+    // continue
+    wasm.Branch(0),
+    wasm.End,
+    wasm.DataDrop(string_data_idx),
+    wasm.End,
+    wasm.End,
+  ])
+}
+
 const nil_global_idx = 0
+
+const string_table_idx = 0
+
+const string_data_idx = 0
 
 fn build_print_string(
   fb: wasm.CodeBuilder,

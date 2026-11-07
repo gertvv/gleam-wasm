@@ -5,17 +5,11 @@ file: ./test/gl_to_wasm/codegen_test.gleam
 test_name: codegen_hello_world_test
 ---
 (func (type 7)
-  (local (ref 0))
   i32.const 0
-  i32.const 13
-  array.new 0
-  local.set 0
-  local.get 0
+  table.get 0
+  array.len
   i32.const 0
-  i32.const 0
-  i32.const 13
-  array.init_data 0 0
-  i32.const 13
-  local.get 0
+  table.get 0
+  ref.as_non_null
   struct.new 4
-  call 5)
+  call 6)

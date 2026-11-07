@@ -6,28 +6,22 @@ test_name: codegen_closure_test
 ---
 (func (type 7)
   (local (ref 1))
-  (local (ref 0))
   (local (ref 1))
   i32.const 0
-  i32.const 5
-  array.new 0
-  local.set 1
-  local.get 1
+  table.get 0
+  array.len
   i32.const 0
-  i32.const 0
-  i32.const 5
-  array.init_data 0 0
-  i32.const 5
-  local.get 1
+  table.get 0
+  ref.as_non_null
   struct.new 4
-  call 6
+  call 7
   local.set 0
   local.get 0
-  local.set 2
-  local.get 2
+  local.set 1
+  local.get 1
   struct.get 1 0
-  local.get 2
+  local.get 1
   struct.get 1 1
   ref.cast (ref 10)
   call_ref 10
-  call 5)
+  call 6)
